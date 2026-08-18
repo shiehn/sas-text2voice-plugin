@@ -4,7 +4,6 @@ import {
   parseText2VoiceArgs,
   PITCH_CEIL,
   PITCH_FLOOR,
-  slotSyllableIndexes,
   voiceBasePitch,
 } from '../compose';
 
@@ -157,19 +156,5 @@ describe('gridVoiceToNotes', () => {
 
   it('throws on an unparseable key', () => {
     expect(() => gridVoiceToNotes(voice, [1, 1, 1], 'H', 'major', 0, 1, 8)).toThrow(CompositionError);
-  });
-});
-
-describe('slotSyllableIndexes', () => {
-  it('reports which syllables actually sound', () => {
-    const withRest = {
-      label: 'x',
-      notes: [
-        { degree: 0, octave: 0, rest: false },
-        { degree: 0, octave: 0, rest: true },
-        { degree: 2, octave: 0, rest: false },
-      ],
-    };
-    expect(slotSyllableIndexes(withRest, [1, 1, 1], 8)).toEqual([0, 2]);
   });
 });

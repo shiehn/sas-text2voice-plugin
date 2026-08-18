@@ -107,6 +107,10 @@ function Text2VoiceGroupRow({
   const [character, setCharacter] = useState<Character>('choir');
   const [voiceCount, setVoiceCount] = useState<number>(3);
   const [ttsVoice, setTtsVoice] = useState<string>('');
+  // How densely syllables sit on the melody: 1 = quarters, 2 = eighths,
+  // 4 = sixteenths. Now that a note carries MANY syllables, this is the
+  // "how fast do the words go" control.
+  const [pace, setPace] = useState<number>(2);
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>([]);
   const [lastPhrase, setLastPhrase] = useState<string>('');
   const [melody, setMelody] = useState<Text2VoiceMelody | null>(null);
@@ -129,6 +133,7 @@ function Text2VoiceGroupRow({
         setCharacter(cfg.character);
         setVoiceCount(cfg.voiceCount);
         setTtsVoice(cfg.ttsVoice ?? '');
+        setPace(cfg.notesPerBeat);
       })
       .catch(() => {});
     void host
@@ -173,6 +178,7 @@ function Text2VoiceGroupRow({
     character: Character;
     voiceCount: number;
     ttsVoice: string;
+    notesPerBeat: number;
   }>): void => {
     if (!scene) return;
     const next = {
@@ -182,7 +188,7 @@ function Text2VoiceGroupRow({
       character,
       voiceCount,
       ttsVoice,
-      notesPerBeat: 2,
+      notesPerBeat: pace,
       ...patch,
     };
     void host.setSceneData(scene, configKey, next).catch(() => {});
@@ -205,7 +211,7 @@ function Text2VoiceGroupRow({
       delivery,
       character,
       voiceCount,
-      notesPerBeat: 2,
+      notesPerBeat: pace,
     },
     bpm: melody?.bpm ?? 0,
     bars: melody?.bars ?? 0,
@@ -331,6 +337,22 @@ function Text2VoiceGroupRow({
           ))}
         </select>
 
+        <select
+          value={pace}
+          onChange={(e) => {
+            const next = parseInt(e.target.value, 10);
+            setPace(next);
+            persist({ notesPerBeat: next });
+          }}
+          title="How densely the words sit on the melody. A long note holds this many syllables per beat — so slower paces recite fewer words on each note."
+          className={SELECT_CLASS}
+          data-testid="text2voice-pace"
+        >
+          <option value={1}>Slow</option>
+          <option value={2}>Medium</option>
+          <option value={4}>Fast</option>
+        </select>
+
         <button
           onClick={regenerate.request}
           disabled={generateDisabled}
@@ -358,7 +380,7 @@ function Text2VoiceGroupRow({
                 character,
                 voiceCount,
                 ttsVoice,
-                notesPerBeat: 2,
+                notesPerBeat: pace,
                 forceMelody: true,
               })
               .then(() => ctx.handlers.generate(anchorTrack.handle.id))

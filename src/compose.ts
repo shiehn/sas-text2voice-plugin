@@ -154,20 +154,3 @@ export function gridVoiceToNotes(
   }
   return notes;
 }
-
-/**
- * Slot index -> syllable index for a voice, accounting for rests. The grid is
- * positional, so slot i is syllable i; rests simply produce no note, which is
- * why this returns the surviving mapping rather than a plain range.
- */
-export function slotSyllableIndexes(voice: GridVoice, rhythm: number[], maxBeats: number): number[] {
-  const out: number[] = [];
-  let cursor = 0;
-  for (let i = 0; i < voice.notes.length; i++) {
-    const dur = rhythm[i] ?? 0.5;
-    if (cursor >= maxBeats) break;
-    if (!voice.notes[i].rest) out.push(i);
-    cursor += dur;
-  }
-  return out;
-}

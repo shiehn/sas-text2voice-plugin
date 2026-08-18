@@ -45,7 +45,7 @@ export function buildVocalLineRequest(
   const specs: VocalSyllableSpec[] = [];
 
   for (const a of assignments) {
-    if (a.syllableIndex === null) continue;
+    if (a.syllableIndex === null || a.note === null) continue;
     const text = syllables[a.syllableIndex];
     if (!text) continue;
     specs.push({

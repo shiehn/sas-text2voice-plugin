@@ -1,22 +1,14 @@
 import {
   countVowelGroups,
-  reconcileSyllablesToNotes,
   syllableBudget,
   validatePhraseInSource,
   validateSyllableSplit,
 } from '../syllables';
-import type { PluginMidiNote } from '@signalsandsorcery/plugin-sdk';
 
 const SOURCE =
   'The observable universe is a ball-shaped region of the universe comprising all matter ' +
   'that can be observed from Earth.';
 
-const note = (startBeat: number, durationBeats = 0.5): PluginMidiNote => ({
-  pitch: 62,
-  startBeat,
-  durationBeats,
-  velocity: 90,
-});
 
 describe('validatePhraseInSource', () => {
   it('accepts a verbatim quote', () => {
@@ -80,51 +72,5 @@ describe('syllableBudget', () => {
     expect(syllableBudget(16, 4, 4)).toBe(256);
     // 6/8 has three quarter-note beats per bar.
     expect(syllableBudget(4, 3, 2)).toBe(24);
-  });
-});
-
-describe('reconcileSyllablesToNotes', () => {
-  it('is a no-op when counts already match', () => {
-    const notes = [note(0), note(0.5), note(1)];
-    const out = reconcileSyllablesToNotes(['a', 'b', 'c'], notes);
-    expect(out.notes).toHaveLength(3);
-    expect(out.syllables).toEqual(['a', 'b', 'c']);
-    expect(out.droppedSyllables).toBe(0);
-    expect(out.mergedNotes).toBe(0);
-  });
-
-  it('drops surplus syllables and reports how many did not fit', () => {
-    const out = reconcileSyllablesToNotes(['a', 'b', 'c', 'd', 'e'], [note(0), note(0.5)]);
-    expect(out.syllables).toEqual(['a', 'b']);
-    expect(out.droppedSyllables).toBe(3);
-  });
-
-  it('merges surplus notes so the phrase still spans its bar', () => {
-    const notes = [note(0), note(0.5), note(1), note(1.5)];
-    const out = reconcileSyllablesToNotes(['a', 'b'], notes);
-    expect(out.notes).toHaveLength(2);
-    expect(out.mergedNotes).toBe(2);
-    // The last kept note is extended to the end of the material it absorbed.
-    const last = out.notes[1];
-    expect(last.startBeat + last.durationBeats).toBeCloseTo(2.0);
-  });
-
-  it('always returns equal-length notes and syllables', () => {
-    const cases: Array<[string[], PluginMidiNote[]]> = [
-      [['a'], [note(0), note(1), note(2)]],
-      [['a', 'b', 'c'], [note(0)]],
-      [[], [note(0)]],
-      [['a'], []],
-    ];
-    for (const [syls, notes] of cases) {
-      const out = reconcileSyllablesToNotes(syls, notes);
-      expect(out.notes.length).toBe(out.syllables.length);
-    }
-  });
-
-  it('sorts notes by start beat before pairing', () => {
-    const out = reconcileSyllablesToNotes(['a', 'b'], [note(1), note(0)]);
-    expect(out.notes[0].startBeat).toBe(0);
-    expect(out.notes[1].startBeat).toBe(1);
   });
 });

@@ -190,7 +190,12 @@ export function deriveHarmonyVoices(
 export interface VoiceSyllableAssignment {
   /** Index into the phrase's syllable array, or null for a rest. */
   syllableIndex: number | null;
-  note: PluginMidiNote;
+  /**
+   * The note to sing it on, or null when this voice is silent at this slot.
+   * Every voice shares the LEAD's syllable timeline (see `alignVoiceToSlots`),
+   * so the arrays stay index-aligned even where a voice drops out.
+   */
+  note: PluginMidiNote | null;
 }
 
 /**
@@ -203,7 +208,7 @@ export interface VoiceSyllableAssignment {
  * rests the others.
  */
 export function assignSyllables(
-  voices: PluginMidiNote[][],
+  voices: Array<Array<PluginMidiNote | null>>,
   syllableCount: number,
   delivery: DeliveryMode,
   canonOffsetSyllables = 2,

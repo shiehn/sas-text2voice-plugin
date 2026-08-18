@@ -1,6 +1,10 @@
 /**
  * Syllable handling — pure, no host, no model.
  *
+ * Fitting syllables to notes lives in distribute.ts: this file is only about
+ * the WORDS — validating that the model quoted the user's text and split it
+ * honestly.
+ *
  * The model returns the syllable split alongside the phrase it chose, which is
  * what lets this plugin avoid a grapheme-to-phoneme dependency altogether (and
  * with it eSpeak NG, whose GPLv3 would be a problem in a closed-source
@@ -99,75 +103,4 @@ export function syllableBudget(
   notesPerBeat: number,
 ): number {
   return Math.max(1, Math.floor(bars * quarterNotesPerBar * notesPerBeat));
-}
-
-export interface ReconcileResult {
-  /** One entry per surviving note; parallel to `notes`. */
-  notes: PluginMidiNote[];
-  /** syllable text per surviving note; same length as `notes`. */
-  syllables: string[];
-  /** Syllables that did not fit and were dropped. */
-  droppedSyllables: number;
-  /** Notes absorbed into a predecessor because there was no syllable for them. */
-  mergedNotes: number;
-}
-
-/**
- * Force a strict 1:1 syllable↔note mapping.
- *
- * Surplus NOTES are merged into their predecessor (the syllable is simply held
- * longer) rather than left silent, so the phrase still spans the bar it was
- * written for. Note this is a sustain, not a true melisma: the renderer holds
- * one pitch per syllable, so a syllable cannot move in pitch while sounding.
- *
- * Surplus SYLLABLES are dropped from the end and counted, so the panel can
- * report honestly that the phrase did not fit.
- */
-export function reconcileSyllablesToNotes(
-  syllables: string[],
-  notes: PluginMidiNote[],
-): ReconcileResult {
-  if (notes.length === 0) {
-    return { notes: [], syllables: [], droppedSyllables: syllables.length, mergedNotes: 0 };
-  }
-  if (syllables.length === 0) {
-    return { notes: [], syllables: [], droppedSyllables: 0, mergedNotes: notes.length };
-  }
-
-  const sorted = [...notes].sort((a, b) => a.startBeat - b.startBeat);
-
-  if (syllables.length >= sorted.length) {
-    return {
-      notes: sorted,
-      syllables: syllables.slice(0, sorted.length),
-      droppedSyllables: syllables.length - sorted.length,
-      mergedNotes: 0,
-    };
-  }
-
-  // Fewer syllables than notes: keep the first `syllables.length` notes and
-  // extend each to swallow the notes that follow it before the next kept one.
-  const keepCount = syllables.length;
-  const kept: PluginMidiNote[] = [];
-  // Spread the kept notes evenly through the phrase rather than clumping them
-  // at the front, so a long line still uses its whole bar.
-  const stride = sorted.length / keepCount;
-  const keepIndexes: number[] = [];
-  for (let i = 0; i < keepCount; i++) keepIndexes.push(Math.floor(i * stride));
-
-  for (let i = 0; i < keepCount; i++) {
-    const startIdx = keepIndexes[i];
-    const nextIdx = i + 1 < keepCount ? keepIndexes[i + 1] : sorted.length;
-    const first = sorted[startIdx];
-    const last = sorted[nextIdx - 1];
-    const end = last.startBeat + last.durationBeats;
-    kept.push({ ...first, durationBeats: Math.max(0.05, end - first.startBeat) });
-  }
-
-  return {
-    notes: kept,
-    syllables: [...syllables],
-    droppedSyllables: 0,
-    mergedNotes: sorted.length - keepCount,
-  };
 }

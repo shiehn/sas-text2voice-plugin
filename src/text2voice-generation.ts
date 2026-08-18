@@ -42,8 +42,8 @@ import {
   CompositionError,
   gridVoiceToNotes,
   parseText2VoiceArgs,
-  slotSyllableIndexes,
 } from './compose';
+import { alignVoiceToSlots, distributeSyllables, melodyCapacity } from './distribute';
 import {
   buildSubmitText2VoiceTool,
   buildSubmitWordsTool,
@@ -52,13 +52,13 @@ import {
   buildWordsSystemPrompt,
   buildWordsUserPrompt,
   composedVoiceCount,
+  melodyNoteBudget,
   SUBMIT_TEXT2VOICE_TOOL_NAME,
   SUBMIT_WORDS_TOOL_NAME,
   type PromptContext,
 } from './prompt';
 import { buildVocalLineRequest } from './render-spec';
 import {
-  reconcileSyllablesToNotes,
   syllableBudget,
   validatePhraseInSource,
   validateSyllableSplit,
@@ -193,20 +193,30 @@ export async function generateText2Voice(
     config.forceMelody = false;
   }
 
-  // Words and notes must line up exactly, whichever path produced them.
-  const reconciled = reconcileSyllablesToNotes(finalWords.syllables, finalMelody.voices[0]);
-  const voices: PluginMidiNote[][] = [...finalMelody.voices];
-  voices[0] = reconciled.notes;
-  const syllables = reconciled.syllables;
+  // Spread the phrase across the melody. The LEAD's subdivided slots become
+  // the syllable timeline; every other voice supplies pitch at those same
+  // moments, so unison and choral stay locked together.
+  const syllables = finalWords.syllables;
+  const spread = distributeSyllables(
+    finalMelody.voices[0],
+    syllables.length,
+    config.notesPerBeat,
+  );
+  const leadSlots = spread.notes;
+  const voices: Array<Array<PluginMidiNote | null>> = [
+    leadSlots,
+    ...finalMelody.voices.slice(1).map((v) => alignVoiceToSlots(v, leadSlots)),
+  ];
 
   // --- delivery: which syllable lands on which note -------------------------
-  const assignments = assignSyllables(voices, syllables.length, config.delivery);
+  const assignments = assignSyllables(voices, spread.used, config.delivery);
 
-  if (reconciled.droppedSyllables > 0) {
+  if (spread.dropped > 0) {
     host.showToast(
       'info',
       'Phrase trimmed to fit',
-      `${reconciled.droppedSyllables} syllable(s) did not fit the melody and were dropped.`,
+      `${spread.dropped} syllable(s) did not fit the melody. Use a longer scene, a denser ` +
+        'rate, or a shorter phrase.',
     );
   }
 
@@ -219,7 +229,7 @@ export async function generateText2Voice(
       }))
     : [{ dbId: anchorDbId, engineId: track.handle.id, voiceIndex: 0 }];
 
-  const plan = planReconcile(existing, voices.length);
+  const plan = planReconcile(existing, finalMelody.voices.length);
 
   if (services.tracks.length + plan.createBucketIndexes.length > TEXT2VOICE_MAX_TRACKS) {
     throw new Error(
@@ -246,7 +256,7 @@ export async function generateText2Voice(
         syllables,
         config.character,
         lane.voiceIndex,
-        voices.length,
+        finalMelody.voices.length,
         bpm,
         totalBeats,
         config.ttsVoice,
@@ -278,7 +288,7 @@ export async function generateText2Voice(
       };
       await host.setSceneData(scene, services.trackDataKey(lane.dbId, TEXT2VOICE_VOICE_META_KEY), meta);
     }
-    await host.setSceneData(scene, configKey, { ...config, voiceCount: voices.length, forceMelody: false });
+    await host.setSceneData(scene, configKey, { ...config, voiceCount: finalMelody.voices.length, forceMelody: false });
   } catch (err) {
     // LIFO rollback: only tracks THIS run created.
     for (const handle of [...created].reverse()) {
@@ -428,7 +438,17 @@ async function composeFromText(
     model: TEXT2VOICE_MODEL,
     systemInstruction: { parts: [{ text: buildText2VoiceSystemPrompt(ctx) }] },
     contents: [{ role: 'user', parts: [{ text: buildText2VoiceUserPrompt(ctx) }] }],
-    tools: [{ functionDeclarations: [buildSubmitText2VoiceTool(config.harmony, config.voiceCount)] }],
+    tools: [
+      {
+        functionDeclarations: [
+          buildSubmitText2VoiceTool(
+            config.harmony,
+            config.voiceCount,
+            melodyNoteBudget(shape.bars, shape.quarterNotesPerBar),
+          ),
+        ],
+      },
+    ],
     toolConfig: {
       functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [SUBMIT_TEXT2VOICE_TOOL_NAME] },
     },
@@ -458,17 +478,20 @@ async function composeFromText(
     throw new Error(`The syllable split was unusable (${splitOk.reason}). Try generating again.`);
   }
 
-  // --- grid -> notes --------------------------------------------------------
+  // --- grid -> melody notes -------------------------------------------------
+  // These are MELODY notes now, not syllable slots: the phrase is spread over
+  // them later, so a long note simply carries more text.
   const wanted = composedVoiceCount(config.harmony, config.voiceCount);
   const composedVoices: PluginMidiNote[][] = [];
-  const composedSyllableIdx: number[][] = [];
   for (let v = 0; v < wanted; v++) {
     const gv = parsed.voices[v] ?? parsed.voices[0];
     if (!gv) throw new CompositionError('no voice lines returned');
     composedVoices.push(
       gridVoiceToNotes(gv, parsed.rhythm, shape.key, shape.mode, v, config.voiceCount, shape.totalBeats),
     );
-    composedSyllableIdx.push(slotSyllableIndexes(gv, parsed.rhythm, shape.totalBeats));
+  }
+  if (composedVoices[0].length === 0) {
+    throw new CompositionError('the melody was entirely rests');
   }
 
   // --- harmony: derived styles fan out from the lead ------------------------
@@ -486,20 +509,17 @@ async function composeFromText(
     );
   }
 
-  // The lead defines how much text actually fits; the other voices follow its
-  // note count through the delivery assignment. The caller reconciles words to
-  // notes, so both the compose and reword paths go through the same check.
-  const leadSyllables = composedSyllableIdx[0].map((i) => parsed.syllables[i]).filter(Boolean);
-
   return {
     melody: {
       voices,
-      slotCount: voices[0].length,
+      // How much text this melody can hold at the current rate — what the
+      // reword path asks the model to aim for.
+      slotCount: melodyCapacity(voices[0], config.notesPerBeat),
       bpm: shape.bpm,
       bars: shape.bars,
       harmony: config.harmony,
       delivery: config.delivery,
     },
-    words: { phrase: parsed.phrase, syllables: leadSyllables },
+    words: { phrase: parsed.phrase, syllables: parsed.syllables },
   };
 }

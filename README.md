@@ -32,6 +32,36 @@ goal — this is a deliberately unnatural vocal instrument.
 Rendering is **offline**, not real-time. That is deliberate: a rendered clip is
 an ordinary audio track, so freeze, export and the arranger all behave normally.
 
+## How the words sit on the melody
+
+The melody is **not** one note per syllable. It supplies the pitch contour and,
+just as importantly, the **breathing** — and then the phrase is spread across it
+at a steady subdivision:
+
+```
+melody:    quarter        (rest)        half
+sung as:   2 eighths      (breath)      4 eighths
+```
+
+One uniform rate, so it reads as a flowing line rather than a metronome, while
+long notes still linger and rests still breathe.
+
+That makes note length a **text-density** control:
+
+| | |
+|---|---|
+| long note | many syllables recited on one pitch — a chant tone |
+| short note | a single syllable |
+| rest | a breath; the words pause and continue after it |
+
+Holding a run of text on one pitch and then moving at the cadence is the psalm-tone
+move, and it is the most characteristic sound this instrument makes. The prompt
+asks for it deliberately.
+
+**Pace** (Slow / Medium / Fast) sets the subdivision — quarters, eighths or
+sixteenths. If a phrase cannot fit even at the fastest pace, the overflow is
+dropped and reported rather than crushed into inaudible clicks.
+
 ## The three intent axes
 
 **Harmony** — how the voices relate in pitch.

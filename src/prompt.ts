@@ -1,16 +1,21 @@
 /**
  * Prompt + schema for the single schema-forced model call.
  *
- * The model does three jobs at once: choose a phrase to QUOTE from the user's
- * text, split it into syllables, and set it to music. Everything comes back in
- * one `submit_text2voice` call.
+ * The model does two jobs at once: choose a phrase to QUOTE from the user's
+ * text, and write a VOCAL LINE for it.
  *
- * The note model is a SYLLABLE GRID: every voice gets exactly one slot per
- * syllable, holding either a scale degree or a rest, and one shared rhythm
- * array gives the slots their durations. Alignment between words and notes is
- * therefore structural — it cannot drift — which is why this plugin does not
- * need ensemble-core's `enforceVoice`: the grid is monophonic, in-scale and
- * density-capped by construction. Only the register clamp is left to do.
+ * The crucial thing it must understand is that note duration controls TEXT
+ * DENSITY, not melisma. Syllables are spread across the melody afterwards at a
+ * steady subdivision (see distribute.ts), so:
+ *
+ *     a long note   → many syllables recited on that one pitch (a chant tone)
+ *     a short note  → a single syllable
+ *     a rest        → a breath, and the words WAIT for it
+ *
+ * That makes the melody's shape the thing that composes the speech rhythm,
+ * which is why the prompt spends most of its words on vocal writing rather than
+ * on the text. Getting this wrong produces the failure this design exists to
+ * fix: an even one-syllable-per-note train that talks without pause.
  */
 
 import type { LLMFunctionDeclaration } from '@signalsandsorcery/plugin-sdk';
@@ -40,16 +45,23 @@ export function composedVoiceCount(harmony: HarmonyStyle, voiceCount: number): n
   return isComposedHarmony(harmony) ? voiceCount : 1;
 }
 
+/** A singable number of melody notes for a scene of this length. */
+export function melodyNoteBudget(bars: number, quarterNotesPerBar: number): { min: number; max: number } {
+  const beats = bars * quarterNotesPerBar;
+  return { min: Math.max(3, Math.round(beats / 4)), max: Math.max(6, Math.round(beats / 1.5)) };
+}
+
 export function buildSubmitText2VoiceTool(
   harmony: HarmonyStyle,
   voiceCount: number,
+  noteBudget: { min: number; max: number },
 ): LLMFunctionDeclaration {
   const nVoices = composedVoiceCount(harmony, voiceCount);
   return {
     name: SUBMIT_TEXT2VOICE_TOOL_NAME,
     description:
-      'Submit the chosen phrase, its syllable split, a shared rhythm, and one ' +
-      `syllable-grid line per voice (${nVoices} ${nVoices === 1 ? 'voice' : 'voices'}).`,
+      'Submit the chosen phrase, its syllable split, and a vocal melody. The melody is ' +
+      'NOT one note per syllable — long notes carry many syllables, rests are breaths.',
     parameters: {
       type: 'object',
       properties: {
@@ -62,24 +74,25 @@ export function buildSubmitText2VoiceTool(
         syllables: {
           type: 'array',
           description:
-            'The phrase split into syllables, in order. Concatenated (ignoring ' +
-            'spaces and punctuation) these must reproduce the phrase exactly. ' +
-            'Example: "observable universe" -> ["ob","serv","a","ble","u","ni","verse"].',
+            'The phrase split into syllables, in order. Concatenated (ignoring spaces ' +
+            'and punctuation) these must reproduce the phrase exactly. Example: ' +
+            '"observable universe" -> ["ob","serv","a","ble","u","ni","verse"]. The ' +
+            'COUNT is independent of the number of melody notes.',
           items: { type: 'string' },
         },
         rhythm: {
           type: 'array',
           description:
-            'Duration in quarter-note beats for each syllable slot, same length ' +
-            'and order as `syllables`. Use longer values on stressed syllables ' +
-            'and at phrase ends.',
+            `Duration in quarter-note beats of each MELODY note (not each syllable), in ` +
+            `order. Length must equal the number of notes in each voice — aim for ` +
+            `${noteBudget.min}-${noteBudget.max} notes. A long value means more syllables ` +
+            `are recited on that pitch; a short value means one syllable. Use 0.5 to 4.`,
           items: { type: 'number' },
         },
         voices: {
           type: 'array',
           description:
-            `Exactly ${nVoices} voice line(s), highest first. Each has one note ` +
-            'slot per syllable, in the same order.',
+            `Exactly ${nVoices} voice line(s), highest first, all sharing the rhythm above.`,
           items: {
             type: 'object',
             properties: {
@@ -90,7 +103,8 @@ export function buildSubmitText2VoiceTool(
               notes: {
                 type: 'array',
                 description:
-                  'One slot per syllable, same length and order as `syllables`.',
+                  'One entry per rhythm value, same length and order. A rest is a BREATH: ' +
+                  'the words pause and resume after it, they are not skipped.',
                 items: {
                   type: 'object',
                   properties: {
@@ -101,13 +115,9 @@ export function buildSubmitText2VoiceTool(
                     },
                     octave: {
                       type: 'integer',
-                      description:
-                        'Octave offset from the voice register, -1, 0 or 1. Use 0 unless leaping.',
+                      description: 'Octave offset: -1, 0 or 1. Use 0 unless deliberately leaping.',
                     },
-                    rest: {
-                      type: 'boolean',
-                      description: 'True to leave this syllable unsung in this voice.',
-                    },
+                    rest: { type: 'boolean', description: 'True for a breath.' },
                   },
                   required: ['degree', 'octave', 'rest'],
                 },
@@ -124,75 +134,124 @@ export function buildSubmitText2VoiceTool(
 
 export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
   const nVoices = composedVoiceCount(ctx.harmony, ctx.voiceCount);
+  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar);
+  const totalBeats = ctx.bars * ctx.quarterNotesPerBar;
   const lines: string[] = [];
 
   lines.push(
-    'You set found text to music for a psychedelic, deliberately unnatural vocal instrument.',
-    'A speech synthesiser speaks each syllable and its pitch is then forced to the note you write,',
-    'so the setting must be singable one-syllable-per-note. Realism is NOT the goal; strangeness is.',
+    'You write VOCAL LINES for a deliberately unnatural choir. A speech synthesiser speaks',
+    'each syllable and its pitch is forced to your note, so what you write is sung by machines.',
+    'Realism is not the goal; strangeness is. But it must still be SINGABLE — that is what',
+    'makes the strangeness land instead of turning to mush.',
+    '',
+    '## The one thing to understand',
+    'You are NOT writing one note per syllable. Syllables are spread across your melody',
+    'afterwards at a steady rate, so a note\'s LENGTH decides how much text sits on it:',
+    '',
+    '    a long note   →  many syllables recited on that one pitch (a chant tone)',
+    '    a short note  →  a single syllable',
+    '    a rest        →  a breath; the words PAUSE and continue after it',
+    '',
+    'So the melody is what composes the speech rhythm. A line of equal short notes will',
+    'gabble without pause — the commonest way to make this sound bad. Vary the lengths.',
+    '',
+    '## Writing for a voice',
+    '- BREATHE. Put rests where the sense of the phrase breaks — at commas, clauses, and',
+    '  between ideas. A line with no rests is unsingable and exhausting to hear.',
+    '- Phrase in arcs: 2-4 bars that rise and settle, then a breath. Not one long ribbon.',
+    '- Move mostly by STEP. Leaps are expressive precisely because they are rare; after a',
+    '  leap, step back in the opposite direction.',
+    '- Land STRESSED syllables on strong beats and on the longer notes. Never put a weak',
+    '  syllable on the longest note of a phrase — that is the mark of a bad setting.',
+    '- Give the phrase\'s most important word the highest note or the longest one.',
+    '- End phrases by settling, usually downward, onto a longer value.',
+    '- Keep the whole line inside about an octave and a fifth. Voices sound strained at the',
+    '  extremes and this instrument exaggerates that.',
+    '',
+    '## Using chant',
+    'A long note holding many syllables is a RECITING TONE — the psalm-tone move: hold one',
+    'pitch through a run of text, then move melodically at the cadence. This is the most',
+    'characteristic sound available here. Use it deliberately: a bar or two of recitation on',
+    'one pitch, then a short melodic tail, then a breath.',
     '',
     '## Your job',
-    '1. Choose a phrase from the supplied text. QUOTE it exactly — never paraphrase or invent words.',
-    `2. Split it into syllables. It must fit ${ctx.syllableBudget} syllables or fewer.`,
-    '3. Give each syllable a duration, and write one note slot per syllable for each voice.',
+    `1. Choose a phrase from the supplied text. QUOTE it exactly — never paraphrase or invent.`,
+    `2. Split it into syllables. Aim for about ${ctx.syllableBudget} or fewer.`,
+    `3. Write ${notes.min}-${notes.max} melody notes with varied durations and real rests,`,
+    '   shaped around where that phrase\'s stresses fall.',
     '',
-    '## Choosing the phrase',
-    '- Prefer a phrase that is striking, strange, or oddly beautiful out of context.',
-    '- Prefer vowel-rich words: they sustain, and sustained vowels are where this instrument sings.',
-    '- A complete grammatical clause beats a fragment cut mid-word.',
-    `- Aim for roughly ${Math.max(4, Math.floor(ctx.syllableBudget * 0.6))}-${ctx.syllableBudget} syllables.`,
-    '',
-    '## The music',
+    '## The scene',
     `- Key: ${ctx.key} ${ctx.mode}. Time signature: ${ctx.timeSignature}. Tempo: ${Math.round(ctx.bpm)} BPM.`,
-    `- Length: ${ctx.bars} bars (${ctx.quarterNotesPerBar} quarter-note beats per bar).`,
+    `- Length: ${ctx.bars} bars = ${totalBeats} quarter-note beats. The rhythm array must sum to at most this.`,
     `- Chords: ${ctx.chordSummary}`,
-    `- Total beats available: ${ctx.bars * ctx.quarterNotesPerBar}. The rhythm array must sum to at most this.`,
-    `- A comfortable default slot is ${(1 / ctx.notesPerBeat).toFixed(2)} beats; vary it for speech rhythm.`,
-    '- Set stressed syllables on strong beats and longer values. Do not let the line become mechanical.',
+    '- Land on chord tones at phrase starts and ends; passing notes between are fine.',
     '',
     `## Harmony — ${ctx.harmony}`,
-    `${HARMONY_DESCRIPTIONS[ctx.harmony]}`,
+    HARMONY_DESCRIPTIONS[ctx.harmony],
   );
 
   if (isComposedHarmony(ctx.harmony)) {
-    lines.push(`- Write ${nVoices} voices, highest first. Voice 0 carries the melody.`);
+    lines.push(`- Write ${nVoices} voices, highest first. Voice 0 carries the melody and the text.`);
     switch (ctx.harmony) {
       case 'choral':
         lines.push(
-          '- All voices sound on the SAME slots — block harmony, no independent rhythm.',
-          '- Space the voices as a chord: avoid unisons and avoid gaps wider than an octave.',
+          '- All voices move together on the same rhythm — block harmony.',
+          '- Space them as chords: no unisons, no gaps wider than an octave, and avoid',
+          '  parallel fifths and octaves between adjacent voices.',
         );
         break;
       case 'counterpoint':
         lines.push(
-          '- Give each voice its own contour. Favour contrary motion; avoid parallel fifths and octaves.',
-          '- Use rests so the voices enter and drop out independently — they should not breathe together.',
+          '- Give each voice its own contour and its own rests, so they breathe at',
+          '  different moments and the texture keeps moving when one voice stops.',
+          '- Favour contrary motion; avoid parallel fifths and octaves.',
         );
         break;
       case 'cluster':
         lines.push(
           '- Stack the voices in tight seconds so they beat against each other.',
-          '- Keep the cluster inside a fifth overall; move it as a block.',
+          '- Keep the whole cluster inside a fifth and move it as a block.',
         );
         break;
       default:
         break;
     }
   } else {
-    lines.push(
-      '- Write ONE voice only. The remaining voices are derived mechanically from it.',
-    );
+    lines.push('- Write ONE voice. The other voices are derived from it mechanically.');
   }
 
   lines.push(
     '',
     `## Delivery — ${ctx.delivery}`,
-    `${DELIVERY_DESCRIPTIONS[ctx.delivery]}`,
+    DELIVERY_DESCRIPTIONS[ctx.delivery],
+  );
+  switch (ctx.delivery) {
+    case 'canon':
+      lines.push(
+        '- The line will be sung against a delayed copy of itself, so it must harmonise',
+        '  with itself: favour stepwise motion and avoid a rhythm so distinctive that the',
+        '  overlap turns to mud.',
+      );
+      break;
+    case 'hocket':
+      lines.push(
+        '- Consecutive syllables will be dealt to different voices, so the line must survive',
+        '  being split: keep it stepwise and avoid long recitations, which fragment badly.',
+      );
+      break;
+    default:
+      lines.push('- Every voice lands on the same syllable at the same instant, so the rhythm you write is heard literally.');
+      break;
+  }
+
+  lines.push(
     '',
     '## Hard rules',
-    '- `syllables`, `rhythm`, and every voice\'s `notes` array must all be the SAME length.',
+    '- `rhythm` and every voice\'s `notes` array must be the SAME length.',
+    '- `syllables` may be a DIFFERENT length — it is spread across the melody, not matched to it.',
     '- Concatenating `syllables` must reproduce `phrase` exactly.',
-    '- Degrees are 0-6. Octave is -1, 0 or 1.',
+    '- Degrees are 0-6; octave is -1, 0 or 1.',
+    `- The rhythm array must sum to at most ${totalBeats} beats.`,
     `- Call ${SUBMIT_TEXT2VOICE_TOOL_NAME} exactly once. Return nothing else.`,
   );
 
@@ -200,15 +259,17 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
 }
 
 export function buildText2VoiceUserPrompt(ctx: PromptContext): string {
+  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar);
   return [
-    'Set a phrase from this text to music:',
+    'Set a phrase from this text as a vocal line:',
     '',
     '"""',
     ctx.text.trim(),
     '"""',
     '',
     `Harmony: ${ctx.harmony}. Delivery: ${ctx.delivery}. Voices to compose: ${composedVoiceCount(ctx.harmony, ctx.voiceCount)}.`,
-    `Fit within ${ctx.syllableBudget} syllables and ${ctx.bars * ctx.quarterNotesPerBar} quarter-note beats.`,
+    `Around ${ctx.syllableBudget} syllables or fewer, on ${notes.min}-${notes.max} melody notes`,
+    `within ${ctx.bars * ctx.quarterNotesPerBar} quarter-note beats. Remember: long notes recite, rests breathe.`,
   ].join('\n');
 }
 
@@ -218,16 +279,15 @@ export function buildText2VoiceUserPrompt(ctx: PromptContext): string {
 //
 // Composing the music is the slow, expensive half. When only the source text
 // has changed, the notes are still good — all that is needed is a new phrase of
-// the right length to sit on them. That is a much smaller ask of the model: no
-// harmony, no rhythm, no register, just "find me N syllables worth of words in
-// here", so it returns fast and cheap.
+// roughly the right length to spread across them. That is a much smaller ask:
+// no harmony, no rhythm, no register, so it returns fast and cheap.
 
 export const SUBMIT_WORDS_TOOL_NAME = 'submit_text2voice_words';
 
-export function buildSubmitWordsTool(slotCount: number): LLMFunctionDeclaration {
+export function buildSubmitWordsTool(targetSyllables: number): LLMFunctionDeclaration {
   return {
     name: SUBMIT_WORDS_TOOL_NAME,
-    description: `Submit a phrase quoted from the text, split into exactly ${slotCount} syllables.`,
+    description: `Submit a phrase quoted from the text, split into about ${targetSyllables} syllables.`,
     parameters: {
       type: 'object',
       properties: {
@@ -240,7 +300,7 @@ export function buildSubmitWordsTool(slotCount: number): LLMFunctionDeclaration 
         syllables: {
           type: 'array',
           description:
-            `The phrase split into syllables, in order — EXACTLY ${slotCount} of them. ` +
+            `The phrase split into syllables, in order — aim for ${targetSyllables}. ` +
             'Concatenated (ignoring spaces and punctuation) they must reproduce the phrase.',
           items: { type: 'string' },
         },
@@ -250,29 +310,30 @@ export function buildSubmitWordsTool(slotCount: number): LLMFunctionDeclaration 
   };
 }
 
-export function buildWordsSystemPrompt(slotCount: number): string {
+export function buildWordsSystemPrompt(targetSyllables: number): string {
   return [
-    'You choose words to be sung by a deliberately unnatural vocal instrument.',
-    'An existing melody is already written and must not change; your phrase has to fit it exactly.',
+    'You choose words to be sung by a deliberately unnatural choir.',
+    'A melody already exists and will not change; your phrase is spread across it.',
     '',
     '## Your job',
-    `1. Choose a phrase from the supplied text with EXACTLY ${slotCount} syllables.`,
+    `1. Choose a phrase from the supplied text with about ${targetSyllables} syllables.`,
     '2. Return it quoted verbatim, plus its syllable split.',
     '',
     '## Rules',
     '- QUOTE the text. Never paraphrase, summarise, or invent a word that is not there.',
-    `- The syllable split must contain exactly ${slotCount} entries — this is a hard constraint,`,
-    '  because each one lands on a note that already exists.',
-    '- Prefer vowel-rich words: they sustain, and sustained vowels are where this instrument sings.',
+    `- Aim for ${targetSyllables} syllables. A little over or under is fine — the setting`,
+    '  stretches or compresses to fit — but a wildly different length will not sit well.',
+    '- Prefer vowel-rich words: they sustain, and sustained vowels are where this sings.',
     '- Prefer a phrase that is striking or strange out of context.',
+    '- Prefer a complete clause over a fragment cut mid-thought.',
     '- Concatenating the syllables must reproduce the phrase exactly.',
     `- Call ${SUBMIT_WORDS_TOOL_NAME} exactly once. Return nothing else.`,
   ].join('\n');
 }
 
-export function buildWordsUserPrompt(text: string, slotCount: number): string {
+export function buildWordsUserPrompt(text: string, targetSyllables: number): string {
   return [
-    `Find a phrase of exactly ${slotCount} syllables in this text:`,
+    `Find a phrase of about ${targetSyllables} syllables in this text:`,
     '',
     '"""',
     text.trim(),
