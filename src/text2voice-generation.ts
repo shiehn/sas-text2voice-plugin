@@ -46,10 +46,14 @@ import {
 } from './compose';
 import {
   buildSubmitText2VoiceTool,
+  buildSubmitWordsTool,
   buildText2VoiceSystemPrompt,
   buildText2VoiceUserPrompt,
+  buildWordsSystemPrompt,
+  buildWordsUserPrompt,
   composedVoiceCount,
   SUBMIT_TEXT2VOICE_TOOL_NAME,
+  SUBMIT_WORDS_TOOL_NAME,
   type PromptContext,
 } from './prompt';
 import { buildVocalLineRequest } from './render-spec';
@@ -62,22 +66,28 @@ import {
 import { tonicPcFor } from './music-helpers';
 import { asVocalHost, HOST_TOO_OLD_MESSAGE } from './host-vocal';
 import {
-  asText2VoiceComposition,
   asText2VoiceConfig,
-  compositionIsReusable,
+  asText2VoiceMelody,
+  asText2VoiceWords,
+  planGeneration,
   planReconcile,
-  TEXT2VOICE_COMPOSITION_KEY,
   TEXT2VOICE_CONFIG_KEY,
+  TEXT2VOICE_MELODY_KEY,
   TEXT2VOICE_VOICE_META_KEY,
-  type Text2VoiceComposition,
+  TEXT2VOICE_WORDS_KEY,
+  type GenerationMode,
   type Text2VoiceConfig,
+  type Text2VoiceMelody,
   type Text2VoiceMeta,
+  type Text2VoiceWords,
 } from './voice-meta';
 
 export const TEXT2VOICE_MAX_TRACKS = 16;
 export const TEXT2VOICE_MODEL = 'gemini-3.1-pro-preview';
 export const TEXT2VOICE_MAX_OUTPUT_TOKENS = 49152;
 export const TEXT2VOICE_TEMPERATURE = 0.9;
+/** The reword call returns a phrase and a split — a fraction of a full setting. */
+export const TEXT2VOICE_REWORD_TOKENS = 4096;
 
 const DEFAULT_CONFIG: Text2VoiceConfig = {
   text: '',
@@ -112,7 +122,8 @@ export async function generateText2Voice(
   const anchorDbId = anchorMember ? anchorMember.dbId : services.engineToDbId(track.handle.id);
 
   const configKey = services.trackDataKey(anchorDbId, TEXT2VOICE_CONFIG_KEY);
-  const compositionKey = services.trackDataKey(anchorDbId, TEXT2VOICE_COMPOSITION_KEY);
+  const melodyKey = services.trackDataKey(anchorDbId, TEXT2VOICE_MELODY_KEY);
+  const wordsKey = services.trackDataKey(anchorDbId, TEXT2VOICE_WORDS_KEY);
 
   const config =
     asText2VoiceConfig(await host.getSceneData(scene, configKey).catch(() => null)) ?? DEFAULT_CONFIG;
@@ -129,17 +140,31 @@ export async function generateText2Voice(
   const totalBeats = bars * qnPerBar;
   const bpm = musical.bpm;
 
-  const cached = asText2VoiceComposition(
-    await host.getSceneData(scene, compositionKey).catch(() => null),
+  const melody = asText2VoiceMelody(
+    await host.getSceneData(scene, melodyKey).catch(() => null),
   );
+  const words = asText2VoiceWords(await host.getSceneData(scene, wordsKey).catch(() => null));
 
-  let composition: Text2VoiceComposition;
+  // A phrase that is no longer present in the text has to be replaced; a phrase
+  // that is still there is kept, which is what lets the user edit the passage
+  // around it without paying to compose again.
+  const wordsStillInSource = words ? validatePhraseInSource(words.phrase, config.text).ok : false;
 
-  if (compositionIsReusable(cached, config, bpm, bars) && cached) {
-    // Re-render only: character / system voice changed, not the music.
-    composition = cached;
-  } else {
-    composition = await composeFromText(host, config, {
+  const mode: GenerationMode = planGeneration({
+    melody,
+    words,
+    config,
+    bpm,
+    bars,
+    wordsStillInSource,
+    forceMelody: config.forceMelody === true,
+  });
+
+  let finalMelody: Text2VoiceMelody;
+  let finalWords: Text2VoiceWords;
+
+  if (mode === 'compose') {
+    const composed = await composeFromText(host, config, {
       key: musical.key,
       mode: musical.mode,
       bpm,
@@ -149,15 +174,41 @@ export async function generateText2Voice(
       chordSummary: summarizeChords(musical.chordProgression),
       totalBeats,
     });
-    await host.setSceneData(scene, compositionKey, composition).catch(() => {});
+    finalMelody = composed.melody;
+    finalWords = composed.words;
+    await host.setSceneData(scene, melodyKey, finalMelody).catch(() => {});
+    await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
+  } else if (mode === 'reword') {
+    // The melody survives; only the words are re-chosen, to its exact length.
+    finalMelody = melody as Text2VoiceMelody;
+    finalWords = await rewordOntoMelody(host, config, finalMelody.slotCount);
+    await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
+  } else {
+    finalMelody = melody as Text2VoiceMelody;
+    finalWords = words as Text2VoiceWords;
   }
 
+  // The force flag is a one-shot request, not a stored preference.
+  if (config.forceMelody) {
+    config.forceMelody = false;
+  }
+
+  // Words and notes must line up exactly, whichever path produced them.
+  const reconciled = reconcileSyllablesToNotes(finalWords.syllables, finalMelody.voices[0]);
+  const voices: PluginMidiNote[][] = [...finalMelody.voices];
+  voices[0] = reconciled.notes;
+  const syllables = reconciled.syllables;
+
   // --- delivery: which syllable lands on which note -------------------------
-  const assignments = assignSyllables(
-    composition.voices,
-    composition.syllables.length,
-    config.delivery,
-  );
+  const assignments = assignSyllables(voices, syllables.length, config.delivery);
+
+  if (reconciled.droppedSyllables > 0) {
+    host.showToast(
+      'info',
+      'Phrase trimmed to fit',
+      `${reconciled.droppedSyllables} syllable(s) did not fit the melody and were dropped.`,
+    );
+  }
 
   // --- reconcile the track set to the voice count ---------------------------
   const existing = group
@@ -168,7 +219,7 @@ export async function generateText2Voice(
       }))
     : [{ dbId: anchorDbId, engineId: track.handle.id, voiceIndex: 0 }];
 
-  const plan = planReconcile(existing, composition.voices.length);
+  const plan = planReconcile(existing, voices.length);
 
   if (services.tracks.length + plan.createBucketIndexes.length > TEXT2VOICE_MAX_TRACKS) {
     throw new Error(
@@ -192,10 +243,10 @@ export async function generateText2Voice(
     for (const lane of lanes) {
       const request = buildVocalLineRequest(
         assignments[lane.voiceIndex] ?? [],
-        composition.syllables,
+        syllables,
         config.character,
         lane.voiceIndex,
-        composition.voices.length,
+        voices.length,
         bpm,
         totalBeats,
         config.ttsVoice,
@@ -227,7 +278,7 @@ export async function generateText2Voice(
       };
       await host.setSceneData(scene, services.trackDataKey(lane.dbId, TEXT2VOICE_VOICE_META_KEY), meta);
     }
-    await host.setSceneData(scene, configKey, { ...config, voiceCount: composition.voices.length });
+    await host.setSceneData(scene, configKey, { ...config, voiceCount: voices.length, forceMelody: false });
   } catch (err) {
     // LIFO rollback: only tracks THIS run created.
     for (const handle of [...created].reverse()) {
@@ -247,7 +298,7 @@ export async function generateText2Voice(
       .catch(() => {});
   }
 
-  services.updateTrack(track.handle.id, (t) => ({ ...t, prompt: composition.phrase }));
+  services.updateTrack(track.handle.id, (t) => ({ ...t, prompt: finalWords.phrase }));
   await services.reloadTracks(true);
 }
 
@@ -277,11 +328,85 @@ function summarizeChords(
   return seen.slice(0, 16).join(' → ');
 }
 
+/** Pull the one expected function call out of a tool-use response. */
+function extractCall(
+  response: { candidates?: Array<{ content?: { parts?: Array<{ functionCall?: { name?: string; args?: unknown } }> }; finishReason?: string }> },
+  name: string,
+  budget: number,
+): unknown {
+  for (const candidate of response.candidates ?? []) {
+    for (const part of candidate.content?.parts ?? []) {
+      if (part.functionCall && part.functionCall.name === name) return part.functionCall.args;
+    }
+  }
+  // Truncation is a STRUCTURAL signal the host already carries; it needs the
+  // opposite advice from "the model declined", so read it rather than guessing
+  // from the message text.
+  if (response.candidates?.some((c) => c.finishReason === 'MAX_TOKENS')) {
+    throw new Error(
+      `The model used its entire ${budget}-token budget before submitting. ` +
+        'Try fewer voices or a shorter scene — rephrasing will not help.',
+    );
+  }
+  return null;
+}
+
+/**
+ * Choose new words for a melody that already exists.
+ *
+ * This is the cheap path: no harmony, no rhythm, no registers — just a phrase
+ * of the right length. It is what makes editing the source text affordable once
+ * the music is written.
+ */
+async function rewordOntoMelody(
+  host: GenerationServices['host'],
+  config: Text2VoiceConfig,
+  slotCount: number,
+): Promise<Text2VoiceWords> {
+  const request: LLMToolUseRequest = {
+    model: TEXT2VOICE_MODEL,
+    systemInstruction: { parts: [{ text: buildWordsSystemPrompt(slotCount) }] },
+    contents: [{ role: 'user', parts: [{ text: buildWordsUserPrompt(config.text, slotCount) }] }],
+    tools: [{ functionDeclarations: [buildSubmitWordsTool(slotCount)] }],
+    toolConfig: {
+      functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [SUBMIT_WORDS_TOOL_NAME] },
+    },
+    generationConfig: { temperature: TEXT2VOICE_TEMPERATURE, maxOutputTokens: TEXT2VOICE_REWORD_TOKENS },
+  };
+
+  const response = await host.generateWithLLMTools(request);
+  const args = extractCall(response, SUBMIT_WORDS_TOOL_NAME, TEXT2VOICE_REWORD_TOKENS);
+  if (!args || typeof args !== 'object') {
+    throw new Error('The model returned no phrase — try different text.');
+  }
+  const a = args as Record<string, unknown>;
+  const phrase = typeof a.phrase === 'string' ? a.phrase.trim() : '';
+  const syllables = (Array.isArray(a.syllables) ? a.syllables : [])
+    .filter((x): x is string => typeof x === 'string')
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+
+  if (!phrase || syllables.length === 0) {
+    throw new Error('The model returned an empty phrase — try different text.');
+  }
+  const inSource = validatePhraseInSource(phrase, config.text);
+  if (!inSource.ok) {
+    throw new Error(`The model did not quote your text (${inSource.reason}). Try again.`);
+  }
+  const splitOk = validateSyllableSplit(syllables, phrase);
+  if (!splitOk.ok) {
+    throw new Error(`The syllable split was unusable (${splitOk.reason}). Try generating again.`);
+  }
+  // A length mismatch is NOT fatal — the reconciler holds notes longer or trims
+  // the tail — so it is left to the caller rather than failing the whole run.
+  return { phrase, syllables };
+}
+
 async function composeFromText(
   host: GenerationServices['host'],
   config: Text2VoiceConfig,
   shape: SceneShape,
-): Promise<Text2VoiceComposition> {
+): Promise<{ melody: Text2VoiceMelody; words: Text2VoiceWords }> {
   const budget = syllableBudget(shape.bars, shape.quarterNotesPerBar, config.notesPerBeat);
   const ctx: PromptContext = {
     text: config.text,
@@ -314,24 +439,8 @@ async function composeFromText(
   };
 
   const response = await host.generateWithLLMTools(request);
-  let args: unknown = null;
-  for (const candidate of response.candidates ?? []) {
-    for (const part of candidate.content?.parts ?? []) {
-      if (part.functionCall && part.functionCall.name === SUBMIT_TEXT2VOICE_TOOL_NAME) {
-        args = part.functionCall.args;
-      }
-    }
-  }
+  const args = extractCall(response, SUBMIT_TEXT2VOICE_TOOL_NAME, TEXT2VOICE_MAX_OUTPUT_TOKENS);
   if (args === null) {
-    // Truncation is a STRUCTURAL signal the host already carries; it needs the
-    // opposite advice from "the model declined", so read it rather than
-    // guessing from the message text.
-    if (response.candidates?.some((c) => c.finishReason === 'MAX_TOKENS')) {
-      throw new Error(
-        `The model used its entire ${TEXT2VOICE_MAX_OUTPUT_TOKENS}-token budget before submitting. ` +
-          'Try fewer voices or a shorter scene — rephrasing will not help.',
-      );
-    }
     throw new Error('The model returned no setting — try different text or another harmony style.');
   }
 
@@ -377,20 +486,20 @@ async function composeFromText(
     );
   }
 
-  // --- strict 1:1 syllables <-> notes on the LEAD ---------------------------
   // The lead defines how much text actually fits; the other voices follow its
-  // note count through the delivery assignment.
+  // note count through the delivery assignment. The caller reconciles words to
+  // notes, so both the compose and reword paths go through the same check.
   const leadSyllables = composedSyllableIdx[0].map((i) => parsed.syllables[i]).filter(Boolean);
-  const reconciled = reconcileSyllablesToNotes(leadSyllables, voices[0]);
-  voices[0] = reconciled.notes;
 
   return {
-    phrase: parsed.phrase,
-    syllables: reconciled.syllables,
-    voices,
-    bpm: shape.bpm,
-    bars: shape.bars,
-    harmony: config.harmony,
-    delivery: config.delivery,
+    melody: {
+      voices,
+      slotCount: voices[0].length,
+      bpm: shape.bpm,
+      bars: shape.bars,
+      harmony: config.harmony,
+      delivery: config.delivery,
+    },
+    words: { phrase: parsed.phrase, syllables: leadSyllables },
   };
 }

@@ -8,25 +8,19 @@
  * word, so it is worth testing on its own.
  */
 
-import type { PluginMidiNote } from '@signalsandsorcery/plugin-sdk';
+import type {
+  PluginMidiNote,
+  RenderVocalLineRequest,
+  VocalSyllableSpec as SdkVocalSyllableSpec,
+} from '@signalsandsorcery/plugin-sdk';
 import { characterFor, type Character } from './harmony-styles';
 import type { VoiceSyllableAssignment } from './harmony-styles';
 
-export interface VocalSyllableSpec {
-  text: string;
-  midi: number;
-  startSec: number;
-  durSec: number;
-  formantWarp: number;
-  breath: number;
-  jitter: number;
-}
-
-export interface VocalLineRequest {
-  syllables: VocalSyllableSpec[];
-  ttsVoice?: string;
-  durationSec: number;
-}
+// The wire contract lives in the SDK (@since 3.4.0); these aliases keep the
+// local call sites readable without redeclaring — and therefore risking drift
+// from — the shape the host actually validates.
+export type VocalSyllableSpec = SdkVocalSyllableSpec;
+export type VocalLineRequest = RenderVocalLineRequest;
 
 export function beatsToSeconds(beats: number, bpm: number): number {
   return (beats * 60) / bpm;

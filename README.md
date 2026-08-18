@@ -65,12 +65,34 @@ sizes.
 
 `natural` · `choir` · `ghost` · `machine` · `menagerie`
 
-## The composition cache
+## The melody survives
 
-Character and system voice are **render-time** settings: changing either replays
-the cached composition with no model call. Only changing the **text**, harmony,
-delivery, voice count, or the scene's tempo/length forces a fresh composition.
-Auditioning voices is therefore free and fast.
+Composing the music is by far the slowest step, so the **melody and the words
+are cached separately** on the anchor. Editing the text does not throw the music
+away.
+
+Pressing Generate takes the cheapest sufficient path, and the button says which
+one it will be before you press it:
+
+| Button | What happens | Cost |
+|---|---|---|
+| **Re-render** | Nothing that matters changed — re-renders the existing music and words. | no model call |
+| **Re-word** | The melody is kept; a new phrase of exactly the right length is found in your text. | one small call |
+| **Compose** | New music and new words. | one full call |
+
+So:
+
+- **Change the character or the speech voice** → Re-render. Auditioning voices is free.
+- **Replace the text** → Re-word. The melody you liked stays exactly as it was; only
+  the words on it change. The caption reads *"melody kept"*.
+- **Change harmony, delivery, voice count, tempo or bar count** → Compose. These
+  define the notes, so the melody genuinely cannot survive them.
+- **Want different music for the same text?** The **♪+** button asks for it
+  explicitly, so you never lose a melody as a side effect of editing something else.
+
+A re-worded phrase is reconciled against the existing notes: a short phrase holds
+its syllables longer, a long one is trimmed, and the panel says how many
+syllables did not fit.
 
 ## Requirements
 
@@ -81,6 +103,16 @@ Auditioning voices is therefore free and fast.
   Nothing is bundled and nothing is fetched, so **the available voices differ per
   platform** — they are enumerated at runtime and never hardcoded.
 - The scene must have a key and a tempo. Chords are used when present.
+
+## Standard track features
+
+- **Track FX** works normally — the drawer's FX tab is on the track row, so
+  third-party VST3/AU inserts behave exactly as on any other track.
+- **Bus sidechain and motion** are enabled: the panel's summed output can duck
+  against the scene's kicks and take tempo-locked filter motion.
+- **Freeze does not apply, by design.** A Text2Voice lane already *is* a rendered
+  stem, so the host declines freeze on audio rows and the ❄ badge does not render.
+  There is nothing to bounce that has not been bounced.
 
 ## Notes and limits
 

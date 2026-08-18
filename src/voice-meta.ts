@@ -25,12 +25,10 @@ import {
 export const TEXT2VOICE_VOICE_META_KEY = 'text2voiceVoice';
 /** Anchor-held config: the source text plus the three intent axes. */
 export const TEXT2VOICE_CONFIG_KEY = 'text2voiceConfig';
-/**
- * Anchor-held cache of the last composition. Re-rendering with a different
- * character or system voice replays this instead of calling the model again —
- * only editing the TEXT requires a new composition.
- */
-export const TEXT2VOICE_COMPOSITION_KEY = 'text2voiceComposition';
+/** Anchor-held cache of the composed music (the expensive artifact). */
+export const TEXT2VOICE_MELODY_KEY = 'text2voiceMelody';
+/** Anchor-held cache of the words currently sitting on that music. */
+export const TEXT2VOICE_WORDS_KEY = 'text2voiceWords';
 
 /** Guards a pathological paste; scenes hold at most a page or so of prose. */
 export const MAX_TEXT_LENGTH = 20000;
@@ -100,6 +98,12 @@ export interface Text2VoiceConfig {
   notesPerBeat: number;
   /** System speech voice for the group; per-lane pins override it. */
   ttsVoice?: string;
+  /**
+   * Set by the panel's "New melody" action and cleared by the next generate.
+   * A transient request, not a preference — it lives here only because the
+   * core's generate handler takes a track id and carries no payload.
+   */
+  forceMelody?: boolean;
 }
 
 export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
@@ -114,65 +118,108 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
     notesPerBeat: c.notesPerBeat === 1 || c.notesPerBeat === 2 || c.notesPerBeat === 4 ? c.notesPerBeat : 2,
   };
   if (typeof c.ttsVoice === 'string') config.ttsVoice = c.ttsVoice;
+  if (c.forceMelody === true) config.forceMelody = true;
   return config;
 }
 
-// --- anchor-held composition cache ---
+// --- anchor-held caches: MELODY and WORDS are stored SEPARATELY ---------
+//
+// Composing the music is the expensive step, so it is cached independently of
+// the words sitting on it. Replacing the text therefore keeps the melody and
+// costs only a small phrase-selection call; changing the character or speech
+// voice costs nothing at all. Only the settings that genuinely define the notes
+// — harmony, delivery, voice count, tempo and length — throw the melody away.
 
-export interface Text2VoiceComposition {
-  /** The phrase the model quoted out of the source text. */
-  phrase: string;
-  /** Its syllable split, in order. */
-  syllables: string[];
+export interface Text2VoiceMelody {
   /** One note array per voice, index 0 = lead. */
   voices: PluginMidiNote[][];
-  /** Scene BPM the composition was written against. */
+  /** Syllable slots the lead provides — the exact length a phrase must fit. */
+  slotCount: number;
   bpm: number;
-  /** Scene bar count it was written for. */
   bars: number;
-  /** Harmony style it was composed under (a change invalidates the cache). */
   harmony: HarmonyStyle;
-  /** Delivery it was composed under. */
   delivery: DeliveryMode;
 }
 
-export function asText2VoiceComposition(val: unknown): Text2VoiceComposition | null {
+export interface Text2VoiceWords {
+  /** The phrase quoted out of the source text. */
+  phrase: string;
+  /** Its syllable split, in order. */
+  syllables: string[];
+}
+
+export function asText2VoiceMelody(val: unknown): Text2VoiceMelody | null {
   if (!val || typeof val !== 'object') return null;
-  const c = val as Partial<Text2VoiceComposition>;
-  if (typeof c.phrase !== 'string' || !Array.isArray(c.syllables) || !Array.isArray(c.voices)) {
-    return null;
-  }
-  if (!c.voices.every((v) => Array.isArray(v))) return null;
+  const m = val as Partial<Text2VoiceMelody>;
+  if (!Array.isArray(m.voices) || !m.voices.every((v) => Array.isArray(v))) return null;
+  if (m.voices.length === 0) return null;
   return {
-    phrase: c.phrase,
-    syllables: c.syllables.filter((s): s is string => typeof s === 'string'),
-    voices: c.voices as PluginMidiNote[][],
-    bpm: typeof c.bpm === 'number' ? c.bpm : 120,
-    bars: typeof c.bars === 'number' ? c.bars : 4,
-    harmony: normalizeHarmony(c.harmony),
-    delivery: normalizeDelivery(c.delivery),
+    voices: m.voices as PluginMidiNote[][],
+    slotCount: typeof m.slotCount === 'number' ? m.slotCount : (m.voices[0]?.length ?? 0),
+    bpm: typeof m.bpm === 'number' ? m.bpm : 120,
+    bars: typeof m.bars === 'number' ? m.bars : 4,
+    harmony: normalizeHarmony(m.harmony),
+    delivery: normalizeDelivery(m.delivery),
   };
 }
 
+export function asText2VoiceWords(val: unknown): Text2VoiceWords | null {
+  if (!val || typeof val !== 'object') return null;
+  const w = val as Partial<Text2VoiceWords>;
+  if (typeof w.phrase !== 'string' || !Array.isArray(w.syllables)) return null;
+  const syllables = w.syllables.filter((s): s is string => typeof s === 'string');
+  if (syllables.length === 0) return null;
+  return { phrase: w.phrase, syllables };
+}
+
 /**
- * Whether a cached composition can be replayed for the current settings.
- * Character and system voice are RENDER-time parameters, so changing either
- * reuses the cache; text, harmony, delivery, voice count and scene shape are
- * COMPOSE-time, so changing any of them requires a fresh model call.
+ * Whether a cached melody still describes the current settings.
+ *
+ * Deliberately NOT sensitive to the source text, the character or the speech
+ * voice — those are what the user is expected to churn, and keeping the melody
+ * across them is the whole point of splitting the caches.
  */
-export function compositionIsReusable(
-  cached: Text2VoiceComposition | null,
+export function melodyIsReusable(
+  melody: Text2VoiceMelody | null,
   config: Text2VoiceConfig,
   bpm: number,
   bars: number,
 ): boolean {
-  if (!cached) return false;
-  if (cached.harmony !== config.harmony) return false;
-  if (cached.delivery !== config.delivery) return false;
-  if (cached.voices.length !== config.voiceCount) return false;
-  if (cached.bars !== bars) return false;
-  if (Math.abs(cached.bpm - bpm) > 0.01) return false;
-  return cached.syllables.length > 0 && cached.voices.length > 0;
+  if (!melody) return false;
+  if (melody.harmony !== config.harmony) return false;
+  if (melody.delivery !== config.delivery) return false;
+  if (melody.voices.length !== config.voiceCount) return false;
+  if (melody.bars !== bars) return false;
+  if (Math.abs(melody.bpm - bpm) > 0.01) return false;
+  return melody.slotCount > 0;
+}
+
+/** What a generate run actually has to do. */
+export type GenerationMode = 'compose' | 'reword' | 'render';
+
+/**
+ * Decide the cheapest sufficient action.
+ *
+ *   compose  melody + words     (one full model call)
+ *   reword   words only         (one small phrase-selection call, melody kept)
+ *   render   neither            (no model call at all)
+ */
+export function planGeneration(params: {
+  melody: Text2VoiceMelody | null;
+  words: Text2VoiceWords | null;
+  config: Text2VoiceConfig;
+  bpm: number;
+  bars: number;
+  /** The phrase still occurs in the current source text. */
+  wordsStillInSource: boolean;
+  /** User explicitly asked for a new melody. */
+  forceMelody?: boolean;
+}): GenerationMode {
+  const { melody, words, config, bpm, bars, wordsStillInSource, forceMelody } = params;
+  if (forceMelody) return 'compose';
+  if (!melodyIsReusable(melody, config, bpm, bars)) return 'compose';
+  if (!words || !wordsStillInSource) return 'reword';
+  return 'render';
 }
 
 // --- reconcile planner (positional, the ensemble shape) ---

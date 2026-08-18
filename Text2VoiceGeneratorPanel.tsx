@@ -51,17 +51,23 @@ import {
   type HarmonyStyle,
 } from './src/harmony-styles';
 import {
-  asText2VoiceComposition,
   asText2VoiceConfig,
+  asText2VoiceMelody,
+  asText2VoiceWords,
   MAX_TEXT_LENGTH,
+  planGeneration,
   stampText2VoiceAnchor,
   text2voiceGroupIsComplete,
   text2voiceGroupSpec,
-  TEXT2VOICE_COMPOSITION_KEY,
   TEXT2VOICE_CONFIG_KEY,
+  TEXT2VOICE_MELODY_KEY,
   TEXT2VOICE_VOICE_META_KEY,
+  TEXT2VOICE_WORDS_KEY,
+  type GenerationMode,
+  type Text2VoiceMelody,
   type Text2VoiceMeta,
 } from './src/voice-meta';
+import { validatePhraseInSource } from './src/syllables';
 import {
   generateText2Voice,
   TEXT2VOICE_MAX_TRACKS,
@@ -92,7 +98,8 @@ function Text2VoiceGroupRow({
   const scene = ctx.services.activeSceneId;
   const host = ctx.services.host;
   const configKey = ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_CONFIG_KEY);
-  const compositionKey = ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_COMPOSITION_KEY);
+  const melodyKey = ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_MELODY_KEY);
+  const wordsKey = ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_WORDS_KEY);
 
   const [text, setText] = useState('');
   const [harmony, setHarmony] = useState<HarmonyStyle>('choral');
@@ -102,7 +109,10 @@ function Text2VoiceGroupRow({
   const [ttsVoice, setTtsVoice] = useState<string>('');
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>([]);
   const [lastPhrase, setLastPhrase] = useState<string>('');
+  const [melody, setMelody] = useState<Text2VoiceMelody | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const isGenerating = group.members.some((m) => m.track.isGenerating);
 
   // Load stored config + the last composition (for the "sang:" caption).
   useEffect(() => {
@@ -122,16 +132,24 @@ function Text2VoiceGroupRow({
       })
       .catch(() => {});
     void host
-      .getSceneData(scene, compositionKey)
+      .getSceneData(scene, melodyKey)
       .then((raw) => {
-        const comp = asText2VoiceComposition(raw);
-        if (comp && !cancelled) setLastPhrase(comp.phrase);
+        if (!cancelled) setMelody(asText2VoiceMelody(raw));
+      })
+      .catch(() => {});
+    void host
+      .getSceneData(scene, wordsKey)
+      .then((raw) => {
+        const w = asText2VoiceWords(raw);
+        if (w && !cancelled) setLastPhrase(w.phrase);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [host, scene, configKey, compositionKey, group.members.length]);
+    // isGenerating: re-read the caches when a run finishes, so the plan label
+    // and the "sang:" caption reflect what was just written.
+  }, [host, scene, configKey, melodyKey, wordsKey, group.members.length, isGenerating]);
 
   // System voices are host-enumerated (they differ per OS), never hardcoded.
   useEffect(() => {
@@ -173,8 +191,37 @@ function Text2VoiceGroupRow({
   const memberEngineIds = group.members.map((m) => m.track.handle.id);
   const allMuted = group.members.every((m) => m.track.runtimeState.muted);
   const anySolo = group.members.some((m) => m.track.runtimeState.solo);
-  const isGenerating = group.members.some((m) => m.track.isGenerating);
   const generateDisabled = isGenerating || text.trim().length === 0;
+
+  // What will pressing Generate actually cost? Composing the music is the slow
+  // step, so the button says which of the three paths it will take rather than
+  // making the user find out by waiting.
+  const plannedMode: GenerationMode = planGeneration({
+    melody,
+    words: lastPhrase ? { phrase: lastPhrase, syllables: [] } : null,
+    config: {
+      text,
+      harmony,
+      delivery,
+      character,
+      voiceCount,
+      notesPerBeat: 2,
+    },
+    bpm: melody?.bpm ?? 0,
+    bars: melody?.bars ?? 0,
+    wordsStillInSource: lastPhrase ? validatePhraseInSource(lastPhrase, text).ok : false,
+  });
+
+  const MODE_LABEL: Record<GenerationMode, string> = {
+    compose: 'Compose',
+    reword: 'Re-word',
+    render: 'Re-render',
+  };
+  const MODE_HINT: Record<GenerationMode, string> = {
+    compose: 'Writes new music and new words. The slow path.',
+    reword: 'Keeps the melody; finds new words to fit it. Much faster than composing.',
+    render: 'Nothing to compose — re-renders the existing music and words with the current voice.',
+  };
 
   const regenerate = useRegenerateGuard({
     hasMidi: lastPhrase.length > 0,
@@ -287,13 +334,7 @@ function Text2VoiceGroupRow({
         <button
           onClick={regenerate.request}
           disabled={generateDisabled}
-          title={
-            text.trim().length === 0
-              ? 'Paste some text first'
-              : lastPhrase
-                ? 'Re-render — replaces the current audio'
-                : 'Compose and render'
-          }
+          title={text.trim().length === 0 ? 'Paste some text first' : MODE_HINT[plannedMode]}
           className={`px-2 py-0.5 text-[10px] font-medium rounded-sm border transition-colors ${
             generateDisabled
               ? 'bg-sas-panel border-sas-border text-sas-muted/50 cursor-not-allowed'
@@ -301,7 +342,38 @@ function Text2VoiceGroupRow({
           }`}
           data-testid="text2voice-generate"
         >
-          {isGenerating ? 'Rendering…' : 'Generate'}
+          {isGenerating ? 'Working…' : MODE_LABEL[plannedMode]}
+        </button>
+
+        {/* Composing is the slow step, so asking for different music is an
+            explicit act rather than a side effect of editing anything else. */}
+        <button
+          onClick={() => {
+            if (!scene) return;
+            void host
+              .setSceneData(scene, configKey, {
+                text,
+                harmony,
+                delivery,
+                character,
+                voiceCount,
+                ttsVoice,
+                notesPerBeat: 2,
+                forceMelody: true,
+              })
+              .then(() => ctx.handlers.generate(anchorTrack.handle.id))
+              .catch(() => {});
+          }}
+          disabled={generateDisabled || !melody}
+          title="Compose different music for this text — discards the current melody"
+          className={`px-1.5 py-0.5 text-[10px] rounded-sm border transition-colors ${
+            generateDisabled || !melody
+              ? 'bg-sas-panel border-sas-border text-sas-muted/40 cursor-not-allowed'
+              : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent hover:text-sas-accent'
+          }`}
+          data-testid="text2voice-new-melody"
+        >
+          ♪+
         </button>
 
         <button
@@ -354,6 +426,9 @@ function Text2VoiceGroupRow({
                 {lastPhrase ? (
                   <>
                     sang: <span className="text-sas-text italic">&ldquo;{lastPhrase}&rdquo;</span>
+                    {melody && plannedMode !== 'compose' && (
+                      <span className="text-sas-accent"> · melody kept</span>
+                    )}
                   </>
                 ) : (
                   'A phrase that fits the scene will be chosen from this text.'
@@ -417,7 +492,8 @@ function Text2VoiceGroupRow({
               [
                 TEXT2VOICE_VOICE_META_KEY,
                 TEXT2VOICE_CONFIG_KEY,
-                TEXT2VOICE_COMPOSITION_KEY,
+                TEXT2VOICE_MELODY_KEY,
+                TEXT2VOICE_WORDS_KEY,
                 'prompt',
                 'role',
                 'groupUi',
@@ -462,6 +538,11 @@ function createText2VoiceAdapter(host: PluginHost): GeneratorPanelAdapter<Text2V
       exportMidi: false,
       transitionDesigner: false,
       importTracks: false,
+      // Bus-strip DSP on the panel's summed output: duck the choir against the
+      // scene's kicks, and tempo-locked filter motion. Both are host-gated, so
+      // they stay inert on older hosts.
+      busSidechain: true,
+      busMotion: true,
     },
     // Audio tracks: no synth is loaded, the rendered WAV is the content.
     createTrackOptions: () => ({ loadSynth: false }),

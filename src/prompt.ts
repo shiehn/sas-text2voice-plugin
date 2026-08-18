@@ -211,3 +211,71 @@ export function buildText2VoiceUserPrompt(ctx: PromptContext): string {
     `Fit within ${ctx.syllableBudget} syllables and ${ctx.bars * ctx.quarterNotesPerBar} quarter-note beats.`,
   ].join('\n');
 }
+
+// ---------------------------------------------------------------------------
+// Re-word: new text onto an EXISTING melody
+// ---------------------------------------------------------------------------
+//
+// Composing the music is the slow, expensive half. When only the source text
+// has changed, the notes are still good — all that is needed is a new phrase of
+// the right length to sit on them. That is a much smaller ask of the model: no
+// harmony, no rhythm, no register, just "find me N syllables worth of words in
+// here", so it returns fast and cheap.
+
+export const SUBMIT_WORDS_TOOL_NAME = 'submit_text2voice_words';
+
+export function buildSubmitWordsTool(slotCount: number): LLMFunctionDeclaration {
+  return {
+    name: SUBMIT_WORDS_TOOL_NAME,
+    description: `Submit a phrase quoted from the text, split into exactly ${slotCount} syllables.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        phrase: {
+          type: 'string',
+          description:
+            'A phrase copied VERBATIM from the supplied text. Do not paraphrase, ' +
+            'summarise or invent words — every word must appear in the source.',
+        },
+        syllables: {
+          type: 'array',
+          description:
+            `The phrase split into syllables, in order — EXACTLY ${slotCount} of them. ` +
+            'Concatenated (ignoring spaces and punctuation) they must reproduce the phrase.',
+          items: { type: 'string' },
+        },
+      },
+      required: ['phrase', 'syllables'],
+    },
+  };
+}
+
+export function buildWordsSystemPrompt(slotCount: number): string {
+  return [
+    'You choose words to be sung by a deliberately unnatural vocal instrument.',
+    'An existing melody is already written and must not change; your phrase has to fit it exactly.',
+    '',
+    '## Your job',
+    `1. Choose a phrase from the supplied text with EXACTLY ${slotCount} syllables.`,
+    '2. Return it quoted verbatim, plus its syllable split.',
+    '',
+    '## Rules',
+    '- QUOTE the text. Never paraphrase, summarise, or invent a word that is not there.',
+    `- The syllable split must contain exactly ${slotCount} entries — this is a hard constraint,`,
+    '  because each one lands on a note that already exists.',
+    '- Prefer vowel-rich words: they sustain, and sustained vowels are where this instrument sings.',
+    '- Prefer a phrase that is striking or strange out of context.',
+    '- Concatenating the syllables must reproduce the phrase exactly.',
+    `- Call ${SUBMIT_WORDS_TOOL_NAME} exactly once. Return nothing else.`,
+  ].join('\n');
+}
+
+export function buildWordsUserPrompt(text: string, slotCount: number): string {
+  return [
+    `Find a phrase of exactly ${slotCount} syllables in this text:`,
+    '',
+    '"""',
+    text.trim(),
+    '"""',
+  ].join('\n');
+}

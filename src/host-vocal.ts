@@ -9,28 +9,20 @@
  * against an older host instead of failing at import time.
  */
 
-import type { VocalLineRequest } from './render-spec';
+import type {
+  PluginSystemVoice,
+  RenderVocalLineRequest,
+  RenderVocalLineResult,
+} from '@signalsandsorcery/plugin-sdk';
 
-export interface VocalLineResult {
-  /** Absolute path to the rendered WAV. */
-  filePath: string;
-  durationSec: number;
-  /**
-   * Indices of syllables that carried no pitch. A voice that is mostly
-   * unvoiced (macOS "Whisper") reports every syllable here — it renders as
-   * breath rather than melody, which is worth surfacing rather than hiding.
-   */
-  unvoicedIndices: number[];
-}
-
-export interface SystemVoice {
-  name: string;
-  locale?: string;
-}
+// Re-exported under local names so call sites read naturally; the contract
+// itself lives in the SDK (@since 3.4.0) so the two cannot drift.
+export type VocalLineResult = RenderVocalLineResult;
+export type SystemVoice = PluginSystemVoice;
 
 export interface VocalHost {
-  renderVocalLine(request: VocalLineRequest): Promise<VocalLineResult>;
-  listSystemVoices(): Promise<SystemVoice[]>;
+  renderVocalLine(request: RenderVocalLineRequest): Promise<RenderVocalLineResult>;
+  listSystemVoices(): Promise<PluginSystemVoice[]>;
 }
 
 export function asVocalHost(host: unknown): VocalHost | null {

@@ -1,4 +1,4 @@
-import { beatsToSeconds, buildVocalLineRequest } from '../render-spec';
+import { beatsToSeconds, buildVocalLineRequest, type VocalSyllableSpec } from '../render-spec';
 import { assignSyllables } from '../harmony-styles';
 import type { PluginMidiNote } from '@signalsandsorcery/plugin-sdk';
 
@@ -24,8 +24,8 @@ describe('buildVocalLineRequest', () => {
     const assignments = assignSyllables([lead], SYLLABLES.length, 'unison')[0];
     const req = buildVocalLineRequest(assignments, SYLLABLES, 'natural', 0, 1, 120, 4);
     expect(req.syllables).toHaveLength(4);
-    expect(req.syllables.map((s) => s.text)).toEqual(SYLLABLES);
-    expect(req.syllables.map((s) => s.midi)).toEqual([62, 65, 67, 69]);
+    expect(req.syllables.map((s: VocalSyllableSpec) => s.text)).toEqual(SYLLABLES);
+    expect(req.syllables.map((s: VocalSyllableSpec) => s.midi)).toEqual([62, 65, 67, 69]);
     expect(req.syllables[1].startSec).toBeCloseTo(0.5);
     expect(req.syllables[0].durSec).toBeCloseTo(0.25);
   });
@@ -34,7 +34,7 @@ describe('buildVocalLineRequest', () => {
     // Hocket: voice 0 of 2 takes the even slots only.
     const assignments = assignSyllables([lead, lead], SYLLABLES.length, 'hocket')[0];
     const req = buildVocalLineRequest(assignments, SYLLABLES, 'natural', 0, 2, 120, 4);
-    expect(req.syllables.map((s) => s.text)).toEqual(['all', 'ter']);
+    expect(req.syllables.map((s: VocalSyllableSpec) => s.text)).toEqual(['all', 'ter']);
     // "ter" keeps its original slot time — it is not pulled forward.
     expect(req.syllables[1].startSec).toBeCloseTo(1.0);
   });
@@ -43,7 +43,7 @@ describe('buildVocalLineRequest', () => {
     const assignments = assignSyllables([lead], SYLLABLES.length, 'unison')[0];
     const req = buildVocalLineRequest(assignments, SYLLABLES, 'ghost', 0, 3, 120, 4);
     expect(req.syllables.length).toBeGreaterThan(0);
-    req.syllables.forEach((s) => {
+    req.syllables.forEach((s: VocalSyllableSpec) => {
       expect(s.breath).toBeGreaterThan(0);
       expect(s.jitter).toBeGreaterThan(0);
     });
@@ -53,7 +53,22 @@ describe('buildVocalLineRequest', () => {
     const assignments = assignSyllables([lead, lead, lead], SYLLABLES.length, 'unison');
     const a = buildVocalLineRequest(assignments[0], SYLLABLES, 'choir', 0, 3, 120, 4);
     const c = buildVocalLineRequest(assignments[2], SYLLABLES, 'choir', 2, 3, 120, 4);
-    expect(a.syllables[0].formantWarp).not.toBeCloseTo(c.syllables[0].formantWarp);
+    // The SDK marks these optional (the host defaults them), but the builder
+    // always supplies all three — a lane rendering with host defaults instead
+    // of its character would silently lose the effect.
+    expect(a.syllables[0].formantWarp).toBeDefined();
+    expect(c.syllables[0].formantWarp).toBeDefined();
+    expect(a.syllables[0].formantWarp!).not.toBeCloseTo(c.syllables[0].formantWarp!);
+  });
+
+  it('always populates every character parameter, never leaving them to host defaults', () => {
+    const assignments = assignSyllables([lead], SYLLABLES.length, 'unison')[0];
+    const req = buildVocalLineRequest(assignments, SYLLABLES, 'natural', 0, 1, 120, 4);
+    req.syllables.forEach((s: VocalSyllableSpec) => {
+      expect(s.formantWarp).toBeDefined();
+      expect(s.breath).toBeDefined();
+      expect(s.jitter).toBeDefined();
+    });
   });
 
   it('leaves room past the last note so a final vowel is not clipped', () => {
