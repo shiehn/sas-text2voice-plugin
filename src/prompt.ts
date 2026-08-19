@@ -31,6 +31,10 @@ export interface PromptContext {
   voiceCount: number;
   /** Style-specific guidance lines, appended verbatim (may be empty). */
   stylePack: string[];
+  /** Note lengths this style wants (beats). */
+  rhythmRange: { minBeats: number; maxBeats: number };
+  /** Where this style's voices live — steers the octave language. */
+  register: { top: number; spanSemitones: number };
   syllableBudget: number;
   key: string;
   mode: string;
@@ -47,16 +51,29 @@ export function composedVoiceCount(harmony: HarmonyStyle, voiceCount: number): n
   return isComposedHarmony(harmony) ? voiceCount : 1;
 }
 
-/** A singable number of melody notes for a scene of this length. */
-export function melodyNoteBudget(bars: number, quarterNotesPerBar: number): { min: number; max: number } {
+/**
+ * A singable number of melody notes for a scene of this length — derived from
+ * the style's note-length range, so a flow style (short notes) is allowed the
+ * density it needs and a chant (long notes) is steered sparse.
+ */
+export function melodyNoteBudget(
+  bars: number,
+  quarterNotesPerBar: number,
+  rhythmRange: { minBeats: number; maxBeats: number } = { minBeats: 0.5, maxBeats: 4 },
+): { min: number; max: number } {
   const beats = bars * quarterNotesPerBar;
-  return { min: Math.max(3, Math.round(beats / 4)), max: Math.max(6, Math.round(beats / 1.5)) };
+  // Leave ~25% of the scene for rests — the breathing is not optional.
+  const singable = beats * 0.75;
+  const min = Math.max(3, Math.round(singable / rhythmRange.maxBeats));
+  const max = Math.max(min + 3, Math.round(singable / Math.max(0.25, rhythmRange.minBeats)));
+  return { min, max };
 }
 
 export function buildSubmitText2VoiceTool(
   harmony: HarmonyStyle,
   voiceCount: number,
   noteBudget: { min: number; max: number },
+  rhythmRange: { minBeats: number; maxBeats: number } = { minBeats: 0.5, maxBeats: 4 },
 ): LLMFunctionDeclaration {
   const nVoices = composedVoiceCount(harmony, voiceCount);
   return {
@@ -88,7 +105,8 @@ export function buildSubmitText2VoiceTool(
             `Duration in quarter-note beats of each MELODY note (not each syllable), in ` +
             `order. Length must equal the number of notes in each voice — aim for ` +
             `${noteBudget.min}-${noteBudget.max} notes. A long value means more syllables ` +
-            `are recited on that pitch; a short value means one syllable. Use 0.5 to 4.`,
+            `are recited on that pitch; a short value means one syllable. ` +
+            `Use ${rhythmRange.minBeats} to ${rhythmRange.maxBeats}.`,
           items: { type: 'number' },
         },
         voices: {
@@ -136,7 +154,7 @@ export function buildSubmitText2VoiceTool(
 
 export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
   const nVoices = composedVoiceCount(ctx.harmony, ctx.voiceCount);
-  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar);
+  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
   const totalBeats = ctx.bars * ctx.quarterNotesPerBar;
   const lines: string[] = [];
 
@@ -191,6 +209,22 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     '  leaves dead air at the end of every loop.',
     `- Chords: ${ctx.chordSummary}`,
     '- Land on chord tones at phrase starts and ends; passing notes between are fine.',
+    `- Note lengths: ${ctx.rhythmRange.minBeats} to ${ctx.rhythmRange.maxBeats} beats. ` +
+      (ctx.rhythmRange.maxBeats <= 2
+        ? 'Short values dominate — this style FLOWS; save length for phrase ends.'
+        : ctx.rhythmRange.minBeats >= 1
+          ? 'Long values dominate — this style RECITES; save short values for cadences.'
+          : 'Mix them; variety is the phrasing.'),
+    ctx.register.top <= 56
+      ? '- REGISTER: a LOW speech register. Keep the line tight — octave jumps sound like a'
+      : ctx.register.spanSemitones >= 20
+        ? '- REGISTER: wide and free — the section spans nearly two octaves; use octave'
+        : '- REGISTER: a comfortable middle band. Use octave offsets sparingly, for',
+    ctx.register.top <= 56
+      ? '  different person, not the same rapper reaching.'
+      : ctx.register.spanSemitones >= 20
+        ? '  offsets (-1/+1) freely for the angular leaps.'
+        : '  emphasis at phrase peaks.',
     '',
     `## Harmony — ${ctx.harmony}`,
     HARMONY_DESCRIPTIONS[ctx.harmony],
@@ -275,7 +309,7 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
 }
 
 export function buildText2VoiceUserPrompt(ctx: PromptContext): string {
-  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar);
+  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
   return [
     'Set a phrase from this text as a vocal line:',
     '',

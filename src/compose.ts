@@ -93,15 +93,50 @@ export function parseText2VoiceArgs(args: unknown): ParsedComposition {
   return { phrase, syllables, rhythm, voices };
 }
 
-/** Base MIDI note for a voice: voice 0 highest, each subsequent one lower. */
-export function voiceBasePitch(voiceIndex: number, voiceCount: number): number {
-  // Spread the section across the usable range rather than a fixed step, so
-  // two voices sit an octave apart and six voices stay inside the ceiling.
-  if (voiceCount <= 1) return 62;
-  const top = 67;
-  const span = Math.min(24, 5 * (voiceCount - 1));
+/**
+ * Base MIDI note for a voice: voice 0 at the style's `top`, each subsequent
+ * one lower across the style's span. Register is style-domain because contour
+ * mode recenters the SPEECH on the target note — a trap lead centred at G4
+ * is a chipmunk; centred at 52-53 it raps.
+ */
+export function voiceBasePitch(
+  voiceIndex: number,
+  voiceCount: number,
+  register: { top: number; spanSemitones: number } = { top: 67, spanSemitones: 24 },
+): number {
+  const top = Math.max(PITCH_FLOOR + 4, Math.min(PITCH_CEIL, register.top));
+  if (voiceCount <= 1) return top;
+  const span = Math.min(register.spanSemitones, 5 * (voiceCount - 1), top - PITCH_FLOOR);
   const step = span / (voiceCount - 1);
   return Math.round(top - voiceIndex * step);
+}
+
+/**
+ * Octave-normalize a melody into a register: shift ALL voices by the same
+ * whole octaves until the LEAD's median sits nearest the register's centre.
+ * Key- and interval-preserving, mechanical, free — this is what keeps style
+ * flips cheap (the cached melody survives) while still landing every style
+ * in its own tessitura.
+ */
+export function normalizeToRegister(
+  voices: PluginMidiNote[][],
+  register: { top: number; spanSemitones: number },
+): PluginMidiNote[][] {
+  const lead = voices[0] ?? [];
+  if (lead.length === 0) return voices;
+  const pitches = lead.map((n) => n.pitch).sort((a, b) => a - b);
+  const median = pitches[Math.floor(pitches.length / 2)];
+  const centre = register.top - register.spanSemitones / 4;
+  const shift = Math.round((centre - median) / 12) * 12;
+  if (shift === 0) return voices;
+  return voices.map((v) =>
+    v.map((n) => {
+      let p = n.pitch + shift;
+      while (p < PITCH_FLOOR) p += 12;
+      while (p > PITCH_CEIL) p -= 12;
+      return { ...n, pitch: p };
+    }),
+  );
 }
 
 function clampToRange(pitch: number): number {
@@ -124,13 +159,14 @@ export function gridVoiceToNotes(
   voiceIndex: number,
   voiceCount: number,
   maxBeats: number,
+  register: { top: number; spanSemitones: number } = { top: 67, spanSemitones: 24 },
 ): PluginMidiNote[] {
   const steps = scaleStepsFor(mode) ?? scaleStepsFor('major');
   const tonic = tonicPcFor(key);
   if (!steps || tonic === null) {
     throw new CompositionError(`unsupported key/mode: ${key} ${mode}`);
   }
-  const base = voiceBasePitch(voiceIndex, voiceCount);
+  const base = voiceBasePitch(voiceIndex, voiceCount, register);
   // Anchor the register on the tonic nearest this voice's base.
   const anchor = base - ((((base % 12) - tonic) % 12) + 12) % 12;
 

@@ -1,6 +1,7 @@
 import {
   CompositionError,
   gridVoiceToNotes,
+  normalizeToRegister,
   parseText2VoiceArgs,
   PITCH_CEIL,
   PITCH_FLOOR,
@@ -156,5 +157,72 @@ describe('gridVoiceToNotes', () => {
 
   it('throws on an unparseable key', () => {
     expect(() => gridVoiceToNotes(voice, [1, 1, 1], 'H', 'major', 0, 1, 8)).toThrow(CompositionError);
+  });
+});
+
+describe('style registers', () => {
+  const trapRegister = { top: 53, spanSemitones: 5 };
+  const choirRegister = { top: 67, spanSemitones: 24 };
+
+  it('centres the lead on the style top — rap register vs choir register', () => {
+    expect(voiceBasePitch(0, 3, trapRegister)).toBe(53);
+    expect(voiceBasePitch(0, 3, choirRegister)).toBe(67);
+  });
+
+  it('keeps a trap crew TIGHT while a choir spreads', () => {
+    const trapSpread = voiceBasePitch(0, 4, trapRegister) - voiceBasePitch(3, 4, trapRegister);
+    const choirSpread = voiceBasePitch(0, 4, choirRegister) - voiceBasePitch(3, 4, choirRegister);
+    expect(trapSpread).toBeLessThanOrEqual(5);
+    expect(choirSpread).toBeGreaterThan(10);
+  });
+
+  it('never leaves the renderable rails, whatever the register asks', () => {
+    for (let v = 0; v < 6; v++) {
+      const p = voiceBasePitch(v, 6, { top: 45, spanSemitones: 30 });
+      expect(p).toBeGreaterThanOrEqual(PITCH_FLOOR);
+      expect(p).toBeLessThanOrEqual(PITCH_CEIL);
+    }
+  });
+});
+
+describe('normalizeToRegister', () => {
+  const note = (pitch: number, startBeat: number): { pitch: number; startBeat: number; durationBeats: number; velocity: number } => ({
+    pitch,
+    startBeat,
+    durationBeats: 0.5,
+    velocity: 90,
+  });
+
+  it('drops a choir-era lead into the trap register by whole octaves', () => {
+    // Median 67 → trap centre ~51.75 → shift −12 (nearest octave).
+    const voices = [[note(65, 0), note(67, 0.5), note(69, 1)]];
+    const out = normalizeToRegister(voices, { top: 53, spanSemitones: 5 });
+    expect(out[0].map((n) => n.pitch)).toEqual([53, 55, 57]);
+  });
+
+  it('leaves a melody already in register untouched', () => {
+    const voices = [[note(52, 0), note(50, 0.5)]];
+    const out = normalizeToRegister(voices, { top: 53, spanSemitones: 5 });
+    expect(out).toEqual(voices);
+  });
+
+  it('shifts every voice by the SAME octaves — intervals survive', () => {
+    const voices = [
+      [note(67, 0)],
+      [note(60, 0)], // a fifth+ below the lead
+    ];
+    const out = normalizeToRegister(voices, { top: 53, spanSemitones: 5 });
+    expect(out[0][0].pitch - out[1][0].pitch).toBe(7);
+  });
+
+  it('raises a too-low melody into a high register', () => {
+    const voices = [[note(45, 0), note(47, 0.5)]];
+    const out = normalizeToRegister(voices, { top: 67, spanSemitones: 24 });
+    expect(out[0][0].pitch).toBeGreaterThan(50);
+  });
+
+  it('handles empty voices without throwing', () => {
+    expect(normalizeToRegister([], { top: 53, spanSemitones: 5 })).toEqual([]);
+    expect(normalizeToRegister([[]], { top: 53, spanSemitones: 5 })).toEqual([[]]);
   });
 });

@@ -43,6 +43,7 @@ import {
 import {
   CompositionError,
   gridVoiceToNotes,
+  normalizeToRegister,
   parseText2VoiceArgs,
 } from './compose';
 import { alignVoiceToSlots, distributeSyllables, melodyCapacity } from './distribute';
@@ -72,7 +73,16 @@ import {
 import { applyBreathGuard, breathLimitsForBpm, detectPhrases } from './phrases';
 import { materializeLines, phraseBudgets } from './lyrics';
 import { buildAdlibEchoes, buildInhales } from './adlib';
-import { laneMixFor, laneRolesFor, roleLabel, STYLES, SUNG_TREATMENT, type LaneRole } from './styles';
+import {
+  DEFAULT_REGISTER,
+  DEFAULT_RHYTHM_RANGE,
+  laneMixFor,
+  laneRolesFor,
+  roleLabel,
+  STYLES,
+  SUNG_TREATMENT,
+  type LaneRole,
+} from './styles';
 import { tonicPcFor } from './music-helpers';
 import { asVocalHost, HOST_TOO_OLD_MESSAGE } from './host-vocal';
 import { isPercussiveRole, monophonize, supportsMelodyImport, type ImportHost } from './import-melody';
@@ -273,12 +283,19 @@ export async function generateText2Voice(
     finalWords = words as Text2VoiceWords;
   }
 
+  // Octave-normalize into the ACTIVE style's register first: cached melodies
+  // survive style flips by design, so a choir-era lead (centred high) must
+  // land in trap's speech register mechanically — key- and interval-preserving,
+  // no model call.
+  const register = config.style ? STYLES[config.style].register : DEFAULT_REGISTER;
+  const registeredVoices = normalizeToRegister(finalMelody.voices, register);
+
   // Spread the phrase across the melody. The LEAD's subdivided slots become
   // the syllable timeline; every other voice supplies pitch at those moments,
   // so unison and choral stay locked together.
   const syllables = finalWords.syllables;
   const spread = distributeSyllables(
-    finalMelody.voices[0],
+    registeredVoices[0],
     syllables.length,
     config.notesPerBeat,
   );
@@ -304,9 +321,9 @@ export async function generateText2Voice(
   // here — which is what makes flipping styles free.
   const composed = isComposedHarmony(config.harmony);
   const harmonyVoices: PluginMidiNote[][] = composed
-    ? finalMelody.voices.slice(1)
+    ? registeredVoices.slice(1)
     : deriveHarmonyVoices(
-        finalMelody.voices[0],
+        registeredVoices[0],
         config.harmony,
         config.voiceCount,
         tonicPcFor(musical.key) ?? 0,
@@ -735,6 +752,8 @@ async function composeFromText(
     delivery: config.delivery,
     voiceCount: config.voiceCount,
     stylePack: config.style ? STYLES[config.style].promptPack : [],
+    rhythmRange: config.style ? STYLES[config.style].rhythmRange : DEFAULT_RHYTHM_RANGE,
+    register: config.style ? STYLES[config.style].register : DEFAULT_REGISTER,
     syllableBudget: budget,
     key: shape.key,
     mode: shape.mode,
@@ -756,7 +775,12 @@ async function composeFromText(
           buildSubmitText2VoiceTool(
             config.harmony,
             config.voiceCount,
-            melodyNoteBudget(shape.bars, shape.quarterNotesPerBar),
+            melodyNoteBudget(
+              shape.bars,
+              shape.quarterNotesPerBar,
+              config.style ? STYLES[config.style].rhythmRange : DEFAULT_RHYTHM_RANGE,
+            ),
+            config.style ? STYLES[config.style].rhythmRange : DEFAULT_RHYTHM_RANGE,
           ),
         ],
       },
@@ -798,12 +822,22 @@ async function composeFromText(
   // These are MELODY notes now, not syllable slots: the phrase is spread over
   // them later, so a long note simply carries more text.
   const wanted = composedVoiceCount(config.harmony, config.voiceCount);
+  const styleRegister = config.style ? STYLES[config.style].register : DEFAULT_REGISTER;
   const composedVoices: PluginMidiNote[][] = [];
   for (let v = 0; v < wanted; v++) {
     const gv = parsed.voices[v] ?? parsed.voices[0];
     if (!gv) throw new CompositionError('no voice lines returned');
     composedVoices.push(
-      gridVoiceToNotes(gv, parsed.rhythm, shape.key, shape.mode, v, config.voiceCount, shape.totalBeats),
+      gridVoiceToNotes(
+        gv,
+        parsed.rhythm,
+        shape.key,
+        shape.mode,
+        v,
+        config.voiceCount,
+        shape.totalBeats,
+        styleRegister,
+      ),
     );
   }
   if (composedVoices[0].length === 0) {

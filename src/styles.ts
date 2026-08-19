@@ -32,6 +32,28 @@ export interface VoxTreatment {
   timeMode: 'fill' | 'natural';
 }
 
+/**
+ * Where a style's voices LIVE. Register is what separates rap from chipmunk:
+ * contour mode recenters the speech on the target note, so the target's
+ * register decides the whole character. `top` is the LEAD's centre; voices
+ * spread downward across `spanSemitones` (clamped to the renderer's safe
+ * rails). Cached melodies are octave-normalized into the active style's
+ * register at render time, so flipping styles stays free AND lands in range.
+ */
+export interface StyleRegister {
+  top: number;
+  spanSemitones: number;
+}
+
+/** Note-length range (beats) the composer is steered toward. */
+export interface RhythmRange {
+  minBeats: number;
+  maxBeats: number;
+}
+
+export const DEFAULT_REGISTER: StyleRegister = { top: 67, spanSemitones: 24 };
+export const DEFAULT_RHYTHM_RANGE: RhythmRange = { minBeats: 0.5, maxBeats: 4 };
+
 export interface StylePreset {
   id: StyleId;
   label: string;
@@ -46,6 +68,10 @@ export interface StylePreset {
   adlibLane: boolean;
   /** Pitch/time treatment for every lane (host >= 3.5.0; older hosts lock). */
   treatment: VoxTreatment;
+  /** Lead centre + downward spread — see StyleRegister. */
+  register: StyleRegister;
+  /** Note lengths the composer is steered toward. */
+  rhythmRange: RhythmRange;
   /** Breathy styles get audible inhales at phrase starts. */
   audibleInhales: boolean;
   /** Extra system-prompt lines composed under this style. */
@@ -66,6 +92,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     notesPerBeat: 2,
     adlibLane: false,
     treatment: SUNG_TREATMENT,
+    register: DEFAULT_REGISTER,
+    rhythmRange: DEFAULT_RHYTHM_RANGE,
     audibleInhales: false,
     promptPack: [],
   },
@@ -79,6 +107,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     notesPerBeat: 1,
     adlibLane: false,
     treatment: { pitchMode: 'lock', contourDepth: 1, timeMode: 'fill' },
+    register: { top: 60, spanSemitones: 14 },
+    rhythmRange: { minBeats: 1, maxBeats: 8 },
     audibleInhales: true,
     promptPack: [
       '## Style: chant',
@@ -96,6 +126,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     notesPerBeat: 2,
     adlibLane: false,
     treatment: { pitchMode: 'contour', contourDepth: 0.35, timeMode: 'natural' },
+    register: { top: 52, spanSemitones: 7 },
+    rhythmRange: { minBeats: 0.25, maxBeats: 2 },
     audibleInhales: false,
     promptPack: [
       '## Style: tag-team rap',
@@ -116,6 +148,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     notesPerBeat: 3,
     adlibLane: true,
     treatment: { pitchMode: 'contour', contourDepth: 0.5, timeMode: 'natural' },
+    register: { top: 53, spanSemitones: 5 },
+    rhythmRange: { minBeats: 0.25, maxBeats: 2 },
     audibleInhales: false,
     promptPack: [
       '## Style: trap',
@@ -135,6 +169,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     notesPerBeat: 2,
     adlibLane: false,
     treatment: { pitchMode: 'contour', contourDepth: 0.85, timeMode: 'fill' },
+    register: { top: 64, spanSemitones: 20 },
+    rhythmRange: { minBeats: 0.5, maxBeats: 4 },
     audibleInhales: true,
     promptPack: [
       '## Style: Sprechgesang',
