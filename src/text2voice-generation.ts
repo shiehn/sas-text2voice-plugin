@@ -47,6 +47,8 @@ import {
 } from './compose';
 import { alignVoiceToSlots, distributeSyllables, melodyCapacity } from './distribute';
 import {
+  buildLyricsSystemPrompt,
+  buildSubmitLyricsTool,
   buildSubmitText2VoiceTool,
   buildSubmitWordsTool,
   buildText2VoiceSystemPrompt,
@@ -55,6 +57,7 @@ import {
   buildWordsUserPrompt,
   composedVoiceCount,
   melodyNoteBudget,
+  SUBMIT_LYRICS_TOOL_NAME,
   SUBMIT_TEXT2VOICE_TOOL_NAME,
   SUBMIT_WORDS_TOOL_NAME,
   type PromptContext,
@@ -67,6 +70,7 @@ import {
   validateSyllableSplit,
 } from './syllables';
 import { applyBreathGuard, breathLimitsForBpm, detectPhrases } from './phrases';
+import { materializeLines, phraseBudgets } from './lyrics';
 import { buildAdlibEchoes, buildInhales } from './adlib';
 import { laneMixFor, laneRolesFor, roleLabel, STYLES, SUNG_TREATMENT, type LaneRole } from './styles';
 import { tonicPcFor } from './music-helpers';
@@ -132,7 +136,12 @@ export async function generateText2Voice(
   const config =
     asText2VoiceConfig(await host.getSceneData(scene, configKey).catch(() => null)) ?? DEFAULT_CONFIG;
 
-  if (!config.text.trim()) {
+  const writeMode = config.sourceMode === 'write';
+  if (writeMode) {
+    if (!(config.topic ?? '').trim()) {
+      throw new Error('Give it a topic first — Write mode invents lyrics about something.');
+    }
+  } else if (!config.text.trim()) {
     throw new Error('Paste some text first — Text2Voice sings words from the text you supply.');
   }
 
@@ -159,10 +168,12 @@ export async function generateText2Voice(
     await host.deleteSceneData(scene, forceKey).catch(() => {});
   }
 
-  // A phrase that is no longer present in the text has to be replaced; a phrase
-  // that is still there is kept, which is what lets the user edit the passage
-  // around it without paying to compose again.
-  const wordsStillInSource = words ? validatePhraseInSource(words.phrase, config.text).ok : false;
+  // Quote mode: a phrase no longer present in the (edited) text has to be
+  // replaced; one still present is kept. Write mode ignores the pasted text
+  // entirely — its reusability is provenance (topic/rhyme), checked in
+  // wordsReusable via the planner.
+  const phraseStillInSource =
+    !writeMode && words ? validatePhraseInSource(words.phrase, config.text).ok : false;
 
   const sceneShape: SceneShapeKey = {
     bpm,
@@ -177,7 +188,7 @@ export async function generateText2Voice(
     words,
     config,
     scene: sceneShape,
-    wordsStillInSource,
+    phraseStillInSource,
     forceMelody,
   });
 
@@ -204,11 +215,13 @@ export async function generateText2Voice(
     // computed LIVE at the current pace — a stored count went stale the moment
     // the user touched the Pace control.
     finalMelody = melody as Text2VoiceMelody;
-    finalWords = await rewordOntoMelody(
-      host,
-      config,
-      melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
-    );
+    finalWords = writeMode
+      ? await writeLyricsOntoMelody(host, config, finalMelody, bpm, totalBeats)
+      : await rewordOntoMelody(
+          host,
+          config,
+          melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
+        );
     await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
   } else {
     finalMelody = melody as Text2VoiceMelody;
@@ -268,7 +281,13 @@ export async function generateText2Voice(
 
   // --- lane roles: derived fresh every run, stored nowhere ------------------
   const roles: LaneRole[] = laneRolesFor(config.style ?? null, config.harmony, laneCount);
-  const wordSpans = syllableWordSpans(finalWords.phrase, syllables);
+  // Write-mode words rebuild their materialization against THESE phrases (the
+  // deterministic same layout), yielding exact spans; quote mode recovers
+  // spans from the validated split.
+  const wordSpans =
+    finalWords.source === 'write' && finalWords.lines
+      ? materializeLines(finalWords.lines, finalWords.lineTexts ?? [], phrases).wordSpans
+      : syllableWordSpans(finalWords.phrase, syllables);
 
   // --- delivery: which syllable lands on which note -------------------------
   const syllableCount = syllables.length;
@@ -541,7 +560,105 @@ async function rewordOntoMelody(
   // A length mismatch is NOT fatal — a short phrase loops onto the melody, a
   // long one is trimmed and reported — so it is left to the distribution layer
   // rather than failing the whole run.
-  return { phrase, syllables };
+  return { phrase, syllables, source: 'quote' };
+}
+
+/**
+ * Write mode's words call: original lyrics about the topic, fitted to the
+ * melody's phrase structure with rhyme targets on phrase-final syllables.
+ *
+ * The provisional pass runs the SAME pipeline the render will (distribute at
+ * live capacity → breath guard → detect phrases), so the materialized 1:1
+ * syllable list lines up slot-for-slot when the render recomputes it.
+ */
+async function writeLyricsOntoMelody(
+  host: GenerationServices['host'],
+  config: Text2VoiceConfig,
+  melody: Text2VoiceMelody,
+  bpm: number,
+  totalBeats: number,
+): Promise<Text2VoiceWords> {
+  const capacity = melodyCapacity(melody.voices[0], config.notesPerBeat);
+  const provisional = distributeSyllables(melody.voices[0], capacity, config.notesPerBeat);
+  const { maxBreathBeats, breathBeats } = breathLimitsForBpm(bpm);
+  const guarded = applyBreathGuard(provisional.notes, maxBreathBeats, breathBeats);
+  const phrases = detectPhrases(guarded.slots, totalBeats, guarded.breathAfterSlot);
+
+  const scheme = config.rhymeScheme ?? 'none';
+  const { budgets, effectiveScheme } = phraseBudgets(phrases, scheme);
+  if (scheme !== 'none' && effectiveScheme !== scheme) {
+    host.showToast(
+      'info',
+      `Rhyme degraded to ${effectiveScheme === 'pairs' ? 'pairs' : 'none'}`,
+      `${scheme} needs at least four phrases; this melody has ${phrases.filter((p) => p.boundary === 'rest').length}. Use ♪ New music for a melody with more phrases.`,
+    );
+  }
+
+  const request: LLMToolUseRequest = {
+    model: TEXT2VOICE_MODEL,
+    systemInstruction: {
+      parts: [
+        {
+          text: buildLyricsSystemPrompt(
+            (config.topic ?? '').trim(),
+            budgets,
+            effectiveScheme,
+            config.style ? STYLES[config.style].promptPack : [],
+          ),
+        },
+      ],
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: `Write the ${budgets.length} lines about: ${(config.topic ?? '').trim()}` }],
+      },
+    ],
+    tools: [{ functionDeclarations: [buildSubmitLyricsTool(budgets)] }],
+    toolConfig: {
+      functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [SUBMIT_LYRICS_TOOL_NAME] },
+    },
+    generationConfig: { temperature: TEXT2VOICE_TEMPERATURE, maxOutputTokens: TEXT2VOICE_REWORD_TOKENS },
+  };
+
+  const response = await host.generateWithLLMTools(request);
+  const args = extractCall(response, SUBMIT_LYRICS_TOOL_NAME, TEXT2VOICE_REWORD_TOKENS);
+  if (!args || typeof args !== 'object') {
+    throw new Error('The model returned no lyrics — try a different topic.');
+  }
+  const rawLines = (args as { lines?: unknown }).lines;
+  if (!Array.isArray(rawLines) || rawLines.length === 0) {
+    throw new Error('The model returned no lyric lines — try a different topic.');
+  }
+  const lines: string[][] = [];
+  const lineTexts: string[] = [];
+  for (const rl of rawLines) {
+    if (!rl || typeof rl !== 'object') continue;
+    const l = rl as { text?: unknown; syllables?: unknown };
+    const syls = Array.isArray(l.syllables)
+      ? l.syllables.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      : [];
+    if (syls.length === 0) continue;
+    const text = typeof l.text === 'string' && l.text.trim() ? l.text.trim() : syls.join('');
+    // The split must reassemble into its line — same honesty rule as quotes.
+    if (!validateSyllableSplit(syls, text).ok) continue;
+    lines.push(syls);
+    lineTexts.push(text);
+  }
+  if (lines.length === 0) {
+    throw new Error('None of the returned lines were usable — try generating again.');
+  }
+
+  const materialized = materializeLines(lines, lineTexts, phrases);
+  return {
+    phrase: materialized.phrase,
+    syllables: materialized.syllables,
+    source: 'write',
+    topic: (config.topic ?? '').trim(),
+    rhymeScheme: scheme,
+    lines,
+    lineTexts,
+  };
 }
 
 async function composeFromText(
@@ -550,8 +667,14 @@ async function composeFromText(
   shape: SceneShape,
 ): Promise<{ melody: Text2VoiceMelody; words: Text2VoiceWords }> {
   const budget = syllableBudget(shape.bars, shape.quarterNotesPerBar, config.notesPerBeat);
+  const writeMode = config.sourceMode === 'write';
   const ctx: PromptContext = {
-    text: config.text,
+    text: writeMode
+      ? `WRITE ORIGINAL LYRICS about this topic (do not quote anything): ${(config.topic ?? '').trim()}` +
+        (config.rhymeScheme && config.rhymeScheme !== 'none'
+          ? `\nWrite at least four phrases (rest-separated) so an ${config.rhymeScheme} rhyme scheme can land; favor end-rhyme.`
+          : '')
+      : config.text,
     harmony: config.harmony,
     delivery: config.delivery,
     voiceCount: config.voiceCount,
@@ -599,12 +722,16 @@ async function composeFromText(
 
   const parsed = parseText2VoiceArgs(args);
 
-  // The phrase must be QUOTED from the user's text, not written about it.
-  const inSource = validatePhraseInSource(parsed.phrase, config.text);
-  if (!inSource.ok) {
-    throw new Error(
-      `The model did not quote your text (${inSource.reason}). Try again, or use a longer passage.`,
-    );
+  // Quote mode: the phrase must be QUOTED, not written about. Write mode
+  // INVENTS by design, so the in-source gate would reject exactly the output
+  // we asked for.
+  if (config.sourceMode !== 'write') {
+    const inSource = validatePhraseInSource(parsed.phrase, config.text);
+    if (!inSource.ok) {
+      throw new Error(
+        `The model did not quote your text (${inSource.reason}). Try again, or use a longer passage.`,
+      );
+    }
   }
   const splitOk = validateSyllableSplit(parsed.syllables, parsed.phrase);
   if (!splitOk.ok) {
@@ -655,6 +782,13 @@ async function composeFromText(
       mode: shape.mode,
       quarterNotesPerBar: shape.quarterNotesPerBar,
     },
-    words: { phrase: parsed.phrase, syllables: parsed.syllables },
+    words: {
+      phrase: parsed.phrase,
+      syllables: parsed.syllables,
+      source: config.sourceMode === 'write' ? 'write' : 'quote',
+      ...(config.sourceMode === 'write'
+        ? { topic: (config.topic ?? '').trim(), rhymeScheme: config.rhymeScheme ?? 'none' }
+        : {}),
+    },
   };
 }

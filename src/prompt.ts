@@ -356,3 +356,89 @@ export function buildWordsUserPrompt(text: string, targetSyllables: number): str
     '"""',
   ].join('\n');
 }
+
+
+// ---------------------------------------------------------------------------
+// Write mode: ORIGINAL lyrics fitted to an existing melody's phrases
+// ---------------------------------------------------------------------------
+
+export const SUBMIT_LYRICS_TOOL_NAME = 'submit_text2voice_lyrics';
+
+export interface LyricPhraseBudget {
+  syllables: number;
+  rhyme: string | null;
+}
+
+export function buildSubmitLyricsTool(budgets: LyricPhraseBudget[]): LLMFunctionDeclaration {
+  return {
+    name: SUBMIT_LYRICS_TOOL_NAME,
+    description:
+      `Submit exactly ${budgets.length} lyric lines, one per musical phrase, each with its ` +
+      'syllable split. Lines sharing a rhyme letter must END on rhyming syllables.',
+    parameters: {
+      type: 'object',
+      properties: {
+        lines: {
+          type: 'array',
+          description:
+            `Exactly ${budgets.length} entries, in phrase order. Line i must aim for its ` +
+            'phrase\'s syllable budget; the LAST syllable of each line lands on the ' +
+            'phrase-final note, which is where rhymes are heard.',
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', description: 'The line as plain words.' },
+              syllables: {
+                type: 'array',
+                description:
+                  'The line split into syllables, in order; concatenated they must ' +
+                  'reproduce the text.',
+                items: { type: 'string' },
+              },
+            },
+            required: ['text', 'syllables'],
+          },
+        },
+      },
+      required: ['lines'],
+    },
+  };
+}
+
+export function buildLyricsSystemPrompt(
+  topic: string,
+  budgets: LyricPhraseBudget[],
+  effectiveScheme: string,
+  stylePack: string[],
+): string {
+  const lines: string[] = [
+    'You write ORIGINAL LYRICS for a deliberately unnatural vocal instrument. A melody',
+    'already exists; your words are fitted to its phrases. Strangeness is welcome;',
+    'the fit is not negotiable.',
+    '',
+    `## Topic`,
+    topic,
+    '',
+    '## The phrases',
+  ];
+  budgets.forEach((b, i) => {
+    lines.push(
+      `- Phrase ${i + 1}: ${b.syllables} syllables${b.rhyme ? ` — end rhyme ${b.rhyme}` : ''}`,
+    );
+  });
+  lines.push(
+    '',
+    '## Rules',
+    '- One line per phrase, in order. Hit each syllable budget as exactly as you can —',
+    '  a miss of one is survivable, more than that mangles the line.',
+    effectiveScheme === 'none'
+      ? '- No rhyme constraint.'
+      : `- Lines sharing a rhyme letter must END on syllables that genuinely rhyme (${effectiveScheme}).`,
+    '- The LAST syllable of each line lands on the phrase-final note — put the weight there.',
+    '- Prefer vowel-rich words; sustained vowels are where this instrument sings.',
+    '- Each line\'s syllables, concatenated, must reproduce its text exactly.',
+    `- Call ${SUBMIT_LYRICS_TOOL_NAME} exactly once. Return nothing else.`,
+  );
+  if (stylePack.length > 0) lines.push('', ...stylePack);
+  return lines.join('\n');
+}

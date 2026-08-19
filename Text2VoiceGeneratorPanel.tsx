@@ -57,6 +57,7 @@ import {
   asText2VoiceWords,
   MAX_TEXT_LENGTH,
   planGeneration,
+  type Text2VoiceWords,
   stampText2VoiceAnchor,
   text2voiceGroupIsComplete,
   text2voiceGroupSpec,
@@ -117,8 +118,11 @@ function Text2VoiceGroupRow({
   const [pace, setPace] = useState<number>(2);
   const [styleId, setStyleId] = useState<StyleId | ''>('');
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>([]);
-  const [lastPhrase, setLastPhrase] = useState<string>('');
+  const [words, setWords] = useState<Text2VoiceWords | null>(null);
   const [melody, setMelody] = useState<Text2VoiceMelody | null>(null);
+  const [sourceMode, setSourceMode] = useState<'quote' | 'write'>('quote');
+  const [topic, setTopic] = useState('');
+  const [rhymeScheme, setRhymeScheme] = useState<'none' | 'AABB' | 'ABAB'>('none');
   const [confirmDelete, setConfirmDelete] = useState(false);
   // The scene shape the GENERATOR will compare against — fetched live, because
   // predicting reusability from the melody's own bpm/bars compares the melody
@@ -154,6 +158,9 @@ function Text2VoiceGroupRow({
         setTtsVoice(cfg.ttsVoice ?? '');
         setPace(cfg.notesPerBeat);
         setStyleId(cfg.style ?? '');
+        setSourceMode(cfg.sourceMode ?? 'quote');
+        setTopic(cfg.topic ?? '');
+        setRhymeScheme(cfg.rhymeScheme ?? 'none');
       })
       .catch(() => {});
     void host
@@ -165,8 +172,7 @@ function Text2VoiceGroupRow({
     void host
       .getSceneData(scene, wordsKey)
       .then((raw) => {
-        const w = asText2VoiceWords(raw);
-        if (w && !cancelled) setLastPhrase(w.phrase);
+        if (!cancelled) setWords(asText2VoiceWords(raw));
       })
       .catch(() => {});
     void host
@@ -214,6 +220,9 @@ function Text2VoiceGroupRow({
       ttsVoice: string;
       notesPerBeat: number;
       style: StyleId | undefined;
+      sourceMode: 'quote' | 'write';
+      topic: string;
+      rhymeScheme: 'none' | 'AABB' | 'ABAB';
     }>): Promise<void> => {
       if (!scene) return Promise.resolve();
       const next = {
@@ -225,12 +234,15 @@ function Text2VoiceGroupRow({
         ttsVoice,
         notesPerBeat: pace,
         style: styleId || undefined,
+        sourceMode,
+        topic,
+        rhymeScheme,
         ...patch,
       };
       if (patch.text !== undefined) textDirty.current = false;
       return host.setSceneData(scene, configKey, next).catch(() => {});
     },
-    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, styleId],
+    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, styleId, sourceMode, topic, rhymeScheme],
   );
 
   // The first Generate used to race the textarea's blur-persist: the run read
@@ -243,14 +255,15 @@ function Text2VoiceGroupRow({
   const memberEngineIds = group.members.map((m) => m.track.handle.id);
   const allMuted = group.members.every((m) => m.track.runtimeState.muted);
   const anySolo = group.members.some((m) => m.track.runtimeState.solo);
-  const generateDisabled = isGenerating || text.trim().length === 0;
+  const generateDisabled =
+    isGenerating || (sourceMode === 'write' ? topic.trim().length === 0 : text.trim().length === 0);
 
   // What will pressing Generate actually cost? Composing the music is the slow
   // step, so the button says which of the three paths it will take rather than
   // making the user find out by waiting.
   const plannedMode: GenerationMode = planGeneration({
     melody,
-    words: lastPhrase ? { phrase: lastPhrase, syllables: ['x'] } : null,
+    words,
     config: {
       text,
       harmony,
@@ -258,6 +271,9 @@ function Text2VoiceGroupRow({
       character,
       voiceCount,
       notesPerBeat: pace,
+      sourceMode,
+      topic,
+      rhymeScheme,
     },
     scene: sceneShape ?? {
       bpm: melody?.bpm ?? 0,
@@ -266,7 +282,8 @@ function Text2VoiceGroupRow({
       mode: melody?.mode ?? '',
       quarterNotesPerBar: melody?.quarterNotesPerBar ?? 4,
     },
-    wordsStillInSource: lastPhrase ? validatePhraseInSource(lastPhrase, text).ok : false,
+    phraseStillInSource:
+      sourceMode === 'quote' && words ? validatePhraseInSource(words.phrase, text).ok : false,
   });
 
   // The style is a fingerprint, not a lock: hand-editing any axis shows Custom.
@@ -299,7 +316,7 @@ function Text2VoiceGroupRow({
   };
 
   const regenerate = useRegenerateGuard({
-    hasMidi: lastPhrase.length > 0,
+    hasMidi: !!words,
     onGenerate: generateNow,
     subject: 'This reading',
     detail: `All ${group.members.length} ${
@@ -520,6 +537,54 @@ function Text2VoiceGroupRow({
         <>
           {/* --- the text area: the panel's whole point ------------------- */}
           <div className="px-2 pt-2 pb-1">
+            <div className="flex items-center gap-2 mb-1.5">
+              {(['quote', 'write'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => {
+                    setSourceMode(m);
+                    void persist({ sourceMode: m });
+                  }}
+                  className={`px-2 py-0.5 text-[10px] rounded-sm border transition-colors ${
+                    sourceMode === m
+                      ? 'bg-sas-accent/20 border-sas-accent text-sas-accent'
+                      : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent'
+                  }`}
+                  data-testid={`text2voice-source-${m}`}
+                >
+                  {m === 'quote' ? 'Quote my text' : 'Write lyrics'}
+                </button>
+              ))}
+              {sourceMode === 'write' && (
+                <select
+                  value={rhymeScheme}
+                  onChange={(e) => {
+                    const next = e.target.value === 'AABB' || e.target.value === 'ABAB' ? e.target.value : 'none';
+                    setRhymeScheme(next);
+                    void persist({ rhymeScheme: next });
+                  }}
+                  title="Rhyme scheme — targets the phrase-final syllables. Degrades to pairs when the melody has fewer than four phrases."
+                  className={SELECT_CLASS}
+                  data-testid="text2voice-rhyme"
+                >
+                  <option value="none">No rhyme</option>
+                  <option value="AABB">AABB</option>
+                  <option value="ABAB">ABAB</option>
+                </select>
+              )}
+            </div>
+            {sourceMode === 'write' ? (
+              <input
+                type="text"
+                value={topic}
+                placeholder="What should the lyrics be about? e.g. a robot falling in love"
+                maxLength={500}
+                onChange={(e) => setTopic(e.target.value)}
+                onBlur={() => void persist({ topic })}
+                className="w-full bg-sas-panel border border-sas-border rounded-sm px-2 py-1.5 text-xs text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
+                data-testid="text2voice-topic"
+              />
+            ) : (
             <textarea
               value={text}
               placeholder="Paste text here — an article, a paragraph, anything. A phrase from it will be quoted and sung."
@@ -533,15 +598,18 @@ function Text2VoiceGroupRow({
               className="w-full resize-y bg-sas-panel border border-sas-border rounded-sm px-2 py-1.5 text-xs leading-relaxed text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
               data-testid="text2voice-text"
             />
+            )}
             <div className="flex items-center justify-between mt-1 gap-2">
               <span className="text-[9px] text-sas-muted truncate">
-                {lastPhrase ? (
+                {words ? (
                   <>
-                    sang: <span className="text-sas-text italic">&ldquo;{lastPhrase}&rdquo;</span>
+                    sang: <span className="text-sas-text italic">&ldquo;{words.phrase}&rdquo;</span>
                     {melody && plannedMode !== 'compose' && (
                       <span className="text-sas-accent"> · melody kept</span>
                     )}
                   </>
+                ) : sourceMode === 'write' ? (
+                  'Original lyrics about your topic will be written to fit the melody.'
                 ) : (
                   'A phrase that fits the scene will be chosen from this text.'
                 )}
@@ -566,9 +634,11 @@ function Text2VoiceGroupRow({
                     ))}
                   </select>
                 )}
-                <span className="text-[9px] text-sas-muted tabular-nums">
-                  {text.length.toLocaleString()} chars
-                </span>
+                {sourceMode === 'quote' && (
+                  <span className="text-[9px] text-sas-muted tabular-nums">
+                    {text.length.toLocaleString()} chars
+                  </span>
+                )}
               </div>
             </div>
           </div>

@@ -48,6 +48,7 @@ const leadOnly: Text2VoiceMelody = { ...melody, voices: [[note]], composedHarmon
 const words: Text2VoiceWords = {
   phrase: 'observable universe',
   syllables: ['ob', 'serv', 'a', 'ble'],
+  source: 'quote',
 };
 
 /** The default: everything cached and the phrase still present in the text. */
@@ -57,7 +58,7 @@ const plan = (over: Partial<Parameters<typeof planGeneration>[0]> = {}) =>
     words,
     config,
     scene,
-    wordsStillInSource: true,
+    phraseStillInSource: true,
     ...over,
   });
 
@@ -178,7 +179,7 @@ describe('planGeneration', () => {
   });
 
   it('re-words — keeping the melody — when the phrase is no longer in the text', () => {
-    expect(plan({ wordsStillInSource: false })).toBe('reword');
+    expect(plan({ phraseStillInSource: false })).toBe('reword');
   });
 
   it('re-words when there are no cached words but the melody survives', () => {
@@ -205,7 +206,7 @@ describe('planGeneration', () => {
   });
 
   it('prefers the cheapest sufficient path — editing text never forces a compose', () => {
-    expect(plan({ wordsStillInSource: false, config: { ...config, text: 'new passage' } })).toBe(
+    expect(plan({ phraseStillInSource: false, config: { ...config, text: 'new passage' } })).toBe(
       'reword',
     );
   });
@@ -239,5 +240,64 @@ describe('planReconcile', () => {
   it('is order-independent on its input', () => {
     const plan = planReconcile([...members].reverse(), 2);
     expect(plan.reuse.map((r) => r.dbId)).toEqual(['a', 'b']);
+  });
+});
+
+
+describe('write-mode provenance (wordsReusable through the planner)', () => {
+  const writeConfig: Text2VoiceConfig = {
+    ...config,
+    sourceMode: 'write',
+    topic: 'a robot falling in love',
+    rhymeScheme: 'AABB',
+  };
+  const writtenWords: Text2VoiceWords = {
+    phrase: 'circuits hum / systems love',
+    syllables: ['cir', 'cuits', 'hum', 'sys', 'tems', 'love'],
+    source: 'write',
+    topic: 'a robot falling in love',
+    rhymeScheme: 'AABB',
+  };
+
+  it('renders when nothing about the request changed', () => {
+    expect(plan({ config: writeConfig, words: writtenWords, phraseStillInSource: false })).toBe('render');
+  });
+
+  it('re-words when the topic changed', () => {
+    expect(
+      plan({
+        config: { ...writeConfig, topic: 'the heat death of the universe' },
+        words: writtenWords,
+        phraseStillInSource: false,
+      }),
+    ).toBe('reword');
+  });
+
+  it('re-words when the rhyme scheme changed', () => {
+    expect(
+      plan({ config: { ...writeConfig, rhymeScheme: 'ABAB' }, words: writtenWords, phraseStillInSource: false }),
+    ).toBe('reword');
+  });
+
+  it('re-words on a sourceMode flip in EITHER direction — quote words cannot serve write', () => {
+    // quote words under a write request:
+    expect(plan({ config: writeConfig, words, phraseStillInSource: true })).toBe('reword');
+    // written words under a quote request (even though the in-source check is moot):
+    expect(plan({ config, words: writtenWords, phraseStillInSource: false })).toBe('reword');
+  });
+
+  it('editing the pasted TEXT in write mode costs nothing', () => {
+    expect(
+      plan({
+        config: { ...writeConfig, text: 'totally different pasted prose' },
+        words: writtenWords,
+        phraseStillInSource: false,
+      }),
+    ).toBe('render');
+  });
+
+  it('legacy words rows read as quotes', () => {
+    const w = asText2VoiceWords({ phrase: 'x y', syllables: ['x', 'y'] });
+    expect(w!.source).toBe('quote');
   });
 });

@@ -109,6 +109,16 @@ export interface Text2VoiceConfig {
    * roles, and goes stale to "Custom" the moment an axis is hand-edited.
    */
   style?: StyleId;
+  /**
+   * Where the words come from: 'quote' sings a phrase from the pasted text
+   * (default, the original behavior); 'write' has the model write ORIGINAL
+   * lyrics about `topic`, fitted to the melody's phrases and rhyme scheme.
+   */
+  sourceMode?: 'quote' | 'write';
+  /** Write mode: what the lyrics are about. */
+  topic?: string;
+  /** Write mode only — rhyme targets are phrase-final syllables. */
+  rhymeScheme?: 'none' | 'AABB' | 'ABAB';
 }
 
 export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
@@ -127,6 +137,10 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
   };
   if (typeof c.ttsVoice === 'string') config.ttsVoice = c.ttsVoice;
   if (isStyleId(c.style)) config.style = c.style;
+  config.sourceMode = c.sourceMode === 'write' ? 'write' : 'quote';
+  if (typeof c.topic === 'string') config.topic = c.topic.slice(0, 500);
+  config.rhymeScheme =
+    c.rhymeScheme === 'AABB' || c.rhymeScheme === 'ABAB' ? c.rhymeScheme : 'none';
   return config;
 }
 
@@ -166,10 +180,22 @@ export interface Text2VoiceMelody {
 }
 
 export interface Text2VoiceWords {
-  /** The phrase quoted out of the source text. */
+  /** The phrase quoted or written. */
   phrase: string;
   /** Its syllable split, in order. */
   syllables: string[];
+  /**
+   * PROVENANCE — what these words were made with. Without it the planner
+   * cannot see that the source mode, topic or rhyme scheme changed, and would
+   * happily re-render lyrics written for another request.
+   */
+  source: 'quote' | 'write';
+  topic?: string;
+  rhymeScheme?: 'none' | 'AABB' | 'ABAB';
+  /** Write mode: the raw per-phrase lines, kept so render-time can rebuild
+   * the exact materialization (and its word spans) deterministically. */
+  lines?: string[][];
+  lineTexts?: string[];
 }
 
 export function asText2VoiceMelody(val: unknown): Text2VoiceMelody | null {
@@ -205,7 +231,44 @@ export function asText2VoiceWords(val: unknown): Text2VoiceWords | null {
   if (typeof w.phrase !== 'string' || !Array.isArray(w.syllables)) return null;
   const syllables = w.syllables.filter((s): s is string => typeof s === 'string');
   if (syllables.length === 0) return null;
-  return { phrase: w.phrase, syllables };
+  const words: Text2VoiceWords = {
+    phrase: w.phrase,
+    syllables,
+    // Legacy rows predate provenance and were all quotes.
+    source: w.source === 'write' ? 'write' : 'quote',
+  };
+  if (typeof w.topic === 'string') words.topic = w.topic;
+  if (w.rhymeScheme === 'AABB' || w.rhymeScheme === 'ABAB' || w.rhymeScheme === 'none') {
+    words.rhymeScheme = w.rhymeScheme;
+  }
+  if (Array.isArray(w.lines) && w.lines.every((l) => Array.isArray(l))) {
+    words.lines = (w.lines as string[][]).map((l) => l.filter((x): x is string => typeof x === 'string'));
+  }
+  if (Array.isArray(w.lineTexts)) {
+    words.lineTexts = w.lineTexts.filter((x): x is string => typeof x === 'string');
+  }
+  return words;
+}
+
+/**
+ * Whether the cached words still serve the current request. Provenance first:
+ * quote-words cannot serve a write request and vice versa. Then per mode —
+ * quote: the phrase must still occur in the (possibly edited) source text;
+ * write: the topic and rhyme scheme must be unchanged.
+ */
+export function wordsReusable(
+  words: Text2VoiceWords | null,
+  config: Text2VoiceConfig,
+  phraseStillInSource: boolean,
+): boolean {
+  if (!words) return false;
+  const mode = config.sourceMode ?? 'quote';
+  if (words.source !== mode) return false;
+  if (mode === 'quote') return phraseStillInSource;
+  return (
+    (words.topic ?? '') === (config.topic ?? '') &&
+    (words.rhymeScheme ?? 'none') === (config.rhymeScheme ?? 'none')
+  );
 }
 
 /** The live scene shape a cached melody must still describe. */
@@ -263,15 +326,15 @@ export function planGeneration(params: {
   words: Text2VoiceWords | null;
   config: Text2VoiceConfig;
   scene: SceneShapeKey;
-  /** The phrase still occurs in the current source text. */
-  wordsStillInSource: boolean;
+  /** quote mode: the phrase still occurs in the current source text. */
+  phraseStillInSource: boolean;
   /** User explicitly asked for a new melody (the one-shot key). */
   forceMelody?: boolean;
 }): GenerationMode {
-  const { melody, words, config, scene, wordsStillInSource, forceMelody } = params;
+  const { melody, words, config, scene, phraseStillInSource, forceMelody } = params;
   if (forceMelody) return 'compose';
   if (!melodyIsReusable(melody, config, scene)) return 'compose';
-  if (!words || !wordsStillInSource) return 'reword';
+  if (!wordsReusable(words, config, phraseStillInSource)) return 'reword';
   return 'render';
 }
 
