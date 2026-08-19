@@ -77,6 +77,7 @@ import {
 } from './src/text2voice-generation';
 import { supportsSystemVoices, type SystemVoice } from './src/host-vocal';
 import { silentShuffleAdapter, silentSoundAdapter } from './src/silent-sound';
+import { configMatchesStyle, isStyleId, STYLE_IDS, STYLES, styleAxes, type StyleId } from './src/styles';
 
 // Rendering is the slow part: one speech spawn per syllable, then one render
 // per voice. Comfortably longer than the model call that precedes it.
@@ -114,6 +115,7 @@ function Text2VoiceGroupRow({
   // 4 = sixteenths. Now that a note carries MANY syllables, this is the
   // "how fast do the words go" control.
   const [pace, setPace] = useState<number>(2);
+  const [styleId, setStyleId] = useState<StyleId | ''>('');
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>([]);
   const [lastPhrase, setLastPhrase] = useState<string>('');
   const [melody, setMelody] = useState<Text2VoiceMelody | null>(null);
@@ -151,6 +153,7 @@ function Text2VoiceGroupRow({
         setVoiceCount(cfg.voiceCount);
         setTtsVoice(cfg.ttsVoice ?? '');
         setPace(cfg.notesPerBeat);
+        setStyleId(cfg.style ?? '');
       })
       .catch(() => {});
     void host
@@ -210,6 +213,7 @@ function Text2VoiceGroupRow({
       voiceCount: number;
       ttsVoice: string;
       notesPerBeat: number;
+      style: StyleId | undefined;
     }>): Promise<void> => {
       if (!scene) return Promise.resolve();
       const next = {
@@ -220,12 +224,13 @@ function Text2VoiceGroupRow({
         voiceCount,
         ttsVoice,
         notesPerBeat: pace,
+        style: styleId || undefined,
         ...patch,
       };
       if (patch.text !== undefined) textDirty.current = false;
       return host.setSceneData(scene, configKey, next).catch(() => {});
     },
-    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace],
+    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, styleId],
   );
 
   // The first Generate used to race the textarea's blur-persist: the run read
@@ -263,6 +268,24 @@ function Text2VoiceGroupRow({
     },
     wordsStillInSource: lastPhrase ? validatePhraseInSource(lastPhrase, text).ok : false,
   });
+
+  // The style is a fingerprint, not a lock: hand-editing any axis shows Custom.
+  const displayedStyle: StyleId | '' =
+    styleId && configMatchesStyle(styleId, { harmony, delivery, character, notesPerBeat: pace })
+      ? styleId
+      : '';
+
+  // Applying a style writes ALL its axes in ONE persist — per-axis writes open
+  // a window where a generate reads a half-applied style.
+  const applyStyle = (id: StyleId): void => {
+    const axes = styleAxes(id);
+    setStyleId(id);
+    setHarmony(axes.harmony);
+    setDelivery(axes.delivery);
+    setCharacter(axes.character);
+    setPace(axes.notesPerBeat);
+    void persist({ ...axes, style: id });
+  };
 
   const MODE_LABEL: Record<GenerationMode, string> = {
     compose: 'Compose',
@@ -314,6 +337,25 @@ function Text2VoiceGroupRow({
         </span>
 
         <div className="flex-1" />
+
+        <select
+          value={displayedStyle}
+          onChange={(e) => {
+            if (isStyleId(e.target.value)) applyStyle(e.target.value);
+          }}
+          title={displayedStyle ? STYLES[displayedStyle].hint : 'Style preset — sets harmony, delivery, character and pace together. Editing any of them afterwards shows Custom.'}
+          className={SELECT_CLASS}
+          data-testid="text2voice-style"
+        >
+          <option value="" disabled>
+            {styleId && !displayedStyle ? 'Custom' : 'Style…'}
+          </option>
+          {STYLE_IDS.map((id) => (
+            <option key={id} value={id}>
+              {STYLES[id].label}
+            </option>
+          ))}
+        </select>
 
         <select
           value={harmony}
@@ -400,6 +442,7 @@ function Text2VoiceGroupRow({
         >
           <option value={1}>Slow</option>
           <option value={2}>Medium</option>
+          <option value={3}>Triplet</option>
           <option value={4}>Fast</option>
         </select>
 

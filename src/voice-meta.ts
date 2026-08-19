@@ -12,6 +12,7 @@ import type {
   GeneratorTrackState,
   PluginMidiNote,
 } from '@signalsandsorcery/plugin-sdk';
+import { isStyleId, type StyleId } from './styles';
 import {
   isComposedHarmony,
   normalizeCharacter,
@@ -98,10 +99,16 @@ export interface Text2VoiceConfig {
   delivery: DeliveryMode;
   character: Character;
   voiceCount: number;
-  /** Notes per quarter-note beat: 1 = quarters, 2 = eighths, 4 = sixteenths. */
+  /** Notes per beat: 1 = quarters, 2 = eighths, 3 = triplets, 4 = sixteenths. */
   notesPerBeat: number;
   /** System speech voice for the group. */
   ttsVoice?: string;
+  /**
+   * The style preset last applied — INFORMATIONAL. The planner reads the
+   * concrete axes only; this drives the picker display, prompt pack and lane
+   * roles, and goes stale to "Custom" the moment an axis is hand-edited.
+   */
+  style?: StyleId;
 }
 
 export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
@@ -113,9 +120,13 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
     delivery: normalizeDelivery(c.delivery),
     character: normalizeCharacter(c.character),
     voiceCount: normalizeVoiceCount(c.voiceCount),
-    notesPerBeat: c.notesPerBeat === 1 || c.notesPerBeat === 2 || c.notesPerBeat === 4 ? c.notesPerBeat : 2,
+    notesPerBeat:
+      c.notesPerBeat === 1 || c.notesPerBeat === 2 || c.notesPerBeat === 3 || c.notesPerBeat === 4
+        ? c.notesPerBeat
+        : 2,
   };
   if (typeof c.ttsVoice === 'string') config.ttsVoice = c.ttsVoice;
+  if (isStyleId(c.style)) config.style = c.style;
   return config;
 }
 

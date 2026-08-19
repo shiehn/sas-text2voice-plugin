@@ -29,6 +29,8 @@ export interface PromptContext {
   harmony: HarmonyStyle;
   delivery: DeliveryMode;
   voiceCount: number;
+  /** Style-specific guidance lines, appended verbatim (may be empty). */
+  stylePack: string[];
   syllableBudget: number;
   key: string;
   mode: string;
@@ -224,6 +226,10 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     lines.push('- Write ONE voice. The other voices are derived from it mechanically.');
   }
 
+  if (ctx.stylePack.length > 0) {
+    lines.push('', ...ctx.stylePack);
+  }
+
   lines.push(
     '',
     `## Delivery — ${ctx.delivery}`,
@@ -241,6 +247,12 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
       lines.push(
         '- Consecutive syllables will be dealt to different voices, so the line must survive',
         '  being split: keep it stepwise and avoid long recitations, which fragment badly.',
+      );
+      break;
+    case 'tagteam':
+      lines.push(
+        '- The crew shouts each phrase-final word, so phrase ends carry the weight: land them',
+        '  on strong beats and end phrases on words that can take a punch.',
       );
       break;
     default:

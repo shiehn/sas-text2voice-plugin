@@ -62,10 +62,13 @@ import {
 import { buildVocalLineRequest } from './render-spec';
 import {
   syllableBudget,
+  syllableWordSpans,
   validatePhraseInSource,
   validateSyllableSplit,
 } from './syllables';
 import { applyBreathGuard, breathLimitsForBpm, detectPhrases } from './phrases';
+import { buildAdlibEchoes } from './adlib';
+import { laneMixFor, laneRolesFor, roleLabel, STYLES, type LaneRole } from './styles';
 import { tonicPcFor } from './music-helpers';
 import { asVocalHost, HOST_TOO_OLD_MESSAGE } from './host-vocal';
 import {
@@ -102,10 +105,6 @@ const DEFAULT_CONFIG: Text2VoiceConfig = {
   voiceCount: 3,
   notesPerBeat: 2,
 };
-
-function voiceLabel(index: number): string {
-  return index === 0 ? 'lead' : `harmony ${index}`;
-}
 
 export async function generateText2Voice(
   track: GeneratorTrackState,
@@ -234,7 +233,6 @@ export async function generateText2Voice(
   const guard = applyBreathGuard(spread.notes, maxBreathBeats, breathBeats);
   const leadSlots = guard.slots;
   const phrases = detectPhrases(leadSlots, totalBeats, guard.breathAfterSlot);
-  void phrases; // consumed by tag-team / adlib / rhyme in the style phases
   if (guard.carved > 0) {
     host.showToast(
       'info',
@@ -268,16 +266,35 @@ export async function generateText2Voice(
     ...harmonyVoices.map((v) => (sustainLane(v) ? [] : alignVoiceToSlots(v, leadSlots))),
   ];
 
+  // --- lane roles: derived fresh every run, stored nowhere ------------------
+  const roles: LaneRole[] = laneRolesFor(config.style ?? null, config.harmony, laneCount);
+  const wordSpans = syllableWordSpans(finalWords.phrase, syllables);
+
   // --- delivery: which syllable lands on which note -------------------------
+  const syllableCount = syllables.length;
   const assignments: VoiceSyllableAssignment[][] = assignSyllables(
     voices,
-    spread.used > 0 ? Math.min(syllables.length, spread.used) : syllables.length,
+    syllableCount,
     config.delivery,
-    { canonOffsetBeats: 2, sceneBeats: totalBeats },
+    {
+      canonOffsetBeats: 2,
+      sceneBeats: totalBeats,
+      phrases,
+      wordSpans,
+      shoutLanes: roles.map((r) => r === 'group'),
+    },
   );
   // Sustain lanes bypass the grid: their one long note holds the first syllable.
   harmonyVoices.forEach((v, i) => {
     if (sustainLane(v)) assignments[i + 1] = sustainAssignments(v, 0);
+  });
+  // Adlib lanes ignore the delivery entirely: they echo phrase-final words
+  // into the gaps, quieter and panned wide (mix carried by the TRACK, since
+  // each rendered lane is peak-normalized).
+  roles.forEach((role, i) => {
+    if (role === 'adlib') {
+      assignments[i] = buildAdlibEchoes(leadSlots, phrases, wordSpans, syllableCount);
+    }
   });
 
   if (spread.dropped > 0) {
@@ -309,6 +326,7 @@ export async function generateText2Voice(
   const created: PluginTrackHandle[] = [];
   const lanes: Array<{ dbId: string; engineId: string; voiceIndex: number }> = [];
   const silentLanes: string[] = [];
+  const laneName = (i: number): string => roleLabel(roles[i] ?? 'group', i);
 
   try {
     for (const r of plan.reuse) lanes.push({ ...r, voiceIndex: r.bucketIndex });
@@ -331,6 +349,13 @@ export async function generateText2Voice(
         totalBeats,
         config.ttsVoice,
       );
+      const mix = laneMixFor(roles[lane.voiceIndex] ?? 'group', lane.voiceIndex);
+      // Mix is applied to EVERY lane EVERY run, resets included: reconcile
+      // reuses tracks positionally, so a lane that was an adlib last run
+      // would otherwise keep its wide pan into its new life as a chorister.
+      await host.setTrackVolume(lane.engineId, mix.volume).catch(() => {});
+      await host.setTrackPan(lane.engineId, mix.pan).catch(() => {});
+
       if (request.syllables.length === 0) {
         // A lane that falls silent this run (canon offset past the phrase,
         // hocket with more voices than syllables) must not keep LAST run's
@@ -338,7 +363,7 @@ export async function generateText2Voice(
         // so — an honest silence.
         await host.setTrackMute(lane.engineId, true).catch(() => {});
         await host.setTrackRole?.(lane.engineId, 'vocals').catch(() => {});
-        silentLanes.push(voiceLabel(lane.voiceIndex));
+        silentLanes.push(laneName(lane.voiceIndex));
         continue;
       }
 
@@ -355,7 +380,7 @@ export async function generateText2Voice(
       if (result.unvoicedIndices.length >= request.syllables.length) {
         host.showToast(
           'info',
-          `${voiceLabel(lane.voiceIndex)} rendered as breath`,
+          `${laneName(lane.voiceIndex)} rendered as breath`,
           'That speech voice is almost entirely unvoiced, so it carries no pitch. Pick another voice for a melodic line.',
         );
       }
@@ -374,7 +399,7 @@ export async function generateText2Voice(
       const meta: Text2VoiceMeta = {
         groupId: anchorDbId,
         voiceIndex: lane.voiceIndex,
-        label: voiceLabel(lane.voiceIndex),
+        label: laneName(lane.voiceIndex),
       };
       await host.setSceneData(scene, services.trackDataKey(lane.dbId, TEXT2VOICE_VOICE_META_KEY), meta);
     }
@@ -514,6 +539,7 @@ async function composeFromText(
     harmony: config.harmony,
     delivery: config.delivery,
     voiceCount: config.voiceCount,
+    stylePack: config.style ? STYLES[config.style].promptPack : [],
     syllableBudget: budget,
     key: shape.key,
     mode: shape.mode,

@@ -14,6 +14,8 @@
 
 import type { PluginMidiNote } from '@signalsandsorcery/plugin-sdk';
 import { shiftSlotsWrapped } from './distribute';
+import type { PhraseSpan } from './phrases';
+import type { WordSpan } from './syllables';
 
 export const HARMONY_STYLES = [
   'unison',
@@ -25,7 +27,7 @@ export const HARMONY_STYLES = [
 ] as const;
 export type HarmonyStyle = (typeof HARMONY_STYLES)[number];
 
-export const DELIVERY_MODES = ['unison', 'canon', 'hocket'] as const;
+export const DELIVERY_MODES = ['unison', 'canon', 'hocket', 'tagteam'] as const;
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 
 export const CHARACTERS = ['natural', 'choir', 'ghost', 'machine', 'menagerie'] as const;
@@ -63,6 +65,7 @@ export const DELIVERY_DESCRIPTIONS: Record<DeliveryMode, string> = {
   unison: 'Every voice speaks the same words at the same moment. Most intelligible.',
   canon: 'Voices enter one after another on the same text, overlapping themselves.',
   hocket: 'Consecutive syllables bounce between voices — one line split across mouths.',
+  tagteam: 'The lead carries the line; the whole crew shouts the last word of every phrase.',
 };
 
 // ---------------------------------------------------------------------------
@@ -219,6 +222,16 @@ export interface AssignOptions {
   canonOffsetBeats?: number;
   /** Scene length in quarter-note beats — required for canon's wrap. */
   sceneBeats?: number;
+  /** Phrase structure of the lead line — required for tagteam. */
+  phrases?: PhraseSpan[];
+  /** Word boundaries in the syllable split — required for tagteam. */
+  wordSpans?: WordSpan[];
+  /**
+   * Per-voice: does this lane join the shouts? (Derived from lane roles by
+   * the caller — passed as booleans so this module needs no role import.)
+   * Index 0 is ignored: the lead always carries the full line.
+   */
+  shoutLanes?: boolean[];
 }
 
 export function assignSyllables(
@@ -265,7 +278,42 @@ export function assignSyllables(
     );
   }
 
-  // unison
+  if (delivery === 'tagteam') {
+    // "Put your left leg... DOWN": the lead carries every line; the crew
+    // punches each phrase's final WORD in unison. Only composed 'rest'
+    // phrases take a shout — a carved catch-breath is not a phrase end.
+    const phrases = (opts.phrases ?? []).filter((p) => p.boundary === 'rest');
+    const wordSpans = opts.wordSpans ?? [];
+    const shoutSlots = new Set<number>();
+    for (const phrase of phrases) {
+      const lastSyl = sylAt(phrase.endSlot - 1);
+      const span = wordSpans.find((w) => lastSyl >= w.startSyl && lastSyl < w.endSyl);
+      if (!span) continue;
+      // Every slot of the phrase whose syllable belongs to the final word —
+      // clamped to at most half the phrase so a two-slot line is not all shout.
+      const candidates: number[] = [];
+      for (let i = phrase.startSlot; i < phrase.endSlot; i++) {
+        const syl = sylAt(i);
+        if (syl >= span.startSyl && syl < span.endSyl) candidates.push(i);
+      }
+      const maxShout = Math.max(1, Math.floor((phrase.endSlot - phrase.startSlot) / 2));
+      for (const i of candidates.slice(-maxShout)) shoutSlots.add(i);
+    }
+    return voices.map((notes, voiceIndex) => {
+      if (voiceIndex === 0) {
+        return notes.map((note, i) => ({ syllableIndex: note ? sylAt(i) : null, note }));
+      }
+      const shouts = opts.shoutLanes?.[voiceIndex] !== false;
+      return notes.map((note, i) => {
+        if (!shouts || !shoutSlots.has(i)) return { syllableIndex: null, note };
+        // A resting crew member still shouts — on the lead's note.
+        const sung = note ?? voices[0][i];
+        return { syllableIndex: sung ? sylAt(i) : null, note: sung };
+      });
+    });
+  }
+
+    // unison
   return voices.map((notes) =>
     notes.map((note, i) => ({ syllableIndex: note ? sylAt(i) : null, note })),
   );
