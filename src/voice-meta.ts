@@ -119,6 +119,10 @@ export interface Text2VoiceConfig {
   topic?: string;
   /** Write mode only — rhyme targets are phrase-final syllables. */
   rhymeScheme?: 'none' | 'AABB' | 'ABAB';
+  /** Where the melody comes from: composed by the model, or read from a track. */
+  melodySource?: 'composed' | 'imported';
+  /** The scene track (tracks.id) the melody is read from, when imported. */
+  importedTrackDbId?: string;
 }
 
 export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
@@ -141,6 +145,13 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
   if (typeof c.topic === 'string') config.topic = c.topic.slice(0, 500);
   config.rhymeScheme =
     c.rhymeScheme === 'AABB' || c.rhymeScheme === 'ABAB' ? c.rhymeScheme : 'none';
+  config.melodySource = c.melodySource === 'imported' ? 'imported' : 'composed';
+  if (typeof c.importedTrackDbId === 'string') config.importedTrackDbId = c.importedTrackDbId;
+  // A composed harmony cannot be jointly written FOR an imported lead — coerce
+  // to the nearest derived style so the fan-out still works.
+  if (config.melodySource === 'imported' && isComposedHarmony(config.harmony)) {
+    config.harmony = 'unison';
+  }
   return config;
 }
 
@@ -177,6 +188,8 @@ export interface Text2VoiceMelody {
   key: string;
   mode: string;
   quarterNotesPerBar: number;
+  /** The track this melody was READ from, when imported (else absent). */
+  importedFrom?: string;
 }
 
 export interface Text2VoiceWords {
@@ -214,7 +227,7 @@ export function asText2VoiceMelody(val: unknown): Text2VoiceMelody | null {
       ? normalizeHarmony(m.composedHarmony)
       : null;
 
-  return {
+  const out: Text2VoiceMelody = {
     voices: m.voices as PluginMidiNote[][],
     composedHarmony,
     bpm: typeof m.bpm === 'number' ? m.bpm : 120,
@@ -223,6 +236,8 @@ export function asText2VoiceMelody(val: unknown): Text2VoiceMelody | null {
     mode: m.mode,
     quarterNotesPerBar: typeof m.quarterNotesPerBar === 'number' ? m.quarterNotesPerBar : 4,
   };
+  if (typeof m.importedFrom === 'string') out.importedFrom = m.importedFrom;
+  return out;
 }
 
 export function asText2VoiceWords(val: unknown): Text2VoiceWords | null {
@@ -303,6 +318,11 @@ export function melodyIsReusable(
   if (Math.abs(melody.bpm - scene.bpm) > 0.01) return false;
   if (melody.key !== scene.key || melody.mode !== scene.mode) return false;
   if (melody.quarterNotesPerBar !== scene.quarterNotesPerBar) return false;
+  // Source identity: an imported request needs THE melody read from THAT
+  // track; a composed request cannot ride an import (and vice versa).
+  const wantImported = config.melodySource === 'imported';
+  if (wantImported !== (melody.importedFrom !== undefined)) return false;
+  if (wantImported && melody.importedFrom !== config.importedTrackDbId) return false;
 
   if (isComposedHarmony(config.harmony)) {
     return melody.composedHarmony === config.harmony && melody.voices.length === config.voiceCount;
@@ -312,14 +332,15 @@ export function melodyIsReusable(
 }
 
 /** What a generate run actually has to do. */
-export type GenerationMode = 'compose' | 'reword' | 'render';
+export type GenerationMode = 'compose' | 'reword' | 'render' | 'import';
 
 /**
  * Decide the cheapest sufficient action.
  *
- *   compose  melody + words     (one full model call)
- *   reword   words only         (one small phrase-selection call, melody kept)
- *   render   neither            (no model call at all)
+ *   compose  melody + words          (one full model call)
+ *   import   melody read from a track (mechanical, no model) + words refit
+ *   reword   words only              (one small call, melody kept)
+ *   render   neither                 (no model call at all)
  */
 export function planGeneration(params: {
   melody: Text2VoiceMelody | null;
@@ -332,8 +353,12 @@ export function planGeneration(params: {
   forceMelody?: boolean;
 }): GenerationMode {
   const { melody, words, config, scene, phraseStillInSource, forceMelody } = params;
-  if (forceMelody) return 'compose';
-  if (!melodyIsReusable(melody, config, scene)) return 'compose';
+  const imported = config.melodySource === 'imported';
+  // An imported melody is a mechanical READ — every path that would compose
+  // re-imports instead (tempo change, source-track change, even ♪ New music,
+  // which for an import means "re-read the track now").
+  if (forceMelody) return imported ? 'import' : 'compose';
+  if (!melodyIsReusable(melody, config, scene)) return imported ? 'import' : 'compose';
   if (!wordsReusable(words, config, phraseStillInSource)) return 'reword';
   return 'render';
 }

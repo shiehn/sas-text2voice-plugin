@@ -75,6 +75,7 @@ import { buildAdlibEchoes, buildInhales } from './adlib';
 import { laneMixFor, laneRolesFor, roleLabel, STYLES, SUNG_TREATMENT, type LaneRole } from './styles';
 import { tonicPcFor } from './music-helpers';
 import { asVocalHost, HOST_TOO_OLD_MESSAGE } from './host-vocal';
+import { isPercussiveRole, monophonize, supportsMelodyImport, type ImportHost } from './import-melody';
 import {
   asText2VoiceConfig,
   asText2VoiceMelody,
@@ -195,7 +196,51 @@ export async function generateText2Voice(
   let finalMelody: Text2VoiceMelody;
   let finalWords: Text2VoiceWords;
 
-  if (mode === 'compose') {
+  if (mode === 'import') {
+    // A mechanical read, no model: the chosen track's MIDI becomes the lead.
+    if (!supportsMelodyImport(host)) {
+      throw new Error('This host cannot read other tracks — update the app to sing an existing track.');
+    }
+    const sourceDbId = config.importedTrackDbId;
+    if (!sourceDbId) {
+      throw new Error('Pick a track to sing first.');
+    }
+    const importHost = host as unknown as Required<ImportHost>;
+    const midi = await importHost.readImportableTrackMidi(sourceDbId);
+    const lead = monophonize(midi.clips ?? [], totalBeats);
+    if (lead.length === 0) {
+      throw new Error('That track has no MIDI in this scene — pick one with notes.');
+    }
+    const summaries = await importHost.listSceneTracks().catch(() => []);
+    const source = summaries.find((t) => t.dbId === sourceDbId);
+    if (isPercussiveRole(source?.role)) {
+      host.showToast(
+        'info',
+        'Singing a drum line',
+        'A percussive track monophonizes to a one-pitch chant — deliberate weirdness, but a melodic track sings better.',
+      );
+    }
+    finalMelody = {
+      voices: [lead],
+      composedHarmony: null,
+      bpm,
+      bars,
+      key: musical.key,
+      mode: musical.mode,
+      quarterNotesPerBar: qnPerBar,
+      importedFrom: sourceDbId,
+    };
+    await host.setSceneData(scene, melodyKey, finalMelody).catch(() => {});
+    // Fresh melody, fresh capacity — the words always refit after an import.
+    finalWords = writeMode
+      ? await writeLyricsOntoMelody(host, config, finalMelody, bpm, totalBeats)
+      : await rewordOntoMelody(
+          host,
+          config,
+          melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
+        );
+    await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
+  } else if (mode === 'compose') {
     const composed = await composeFromText(host, config, {
       key: musical.key,
       mode: musical.mode,

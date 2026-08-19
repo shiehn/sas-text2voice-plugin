@@ -77,6 +77,7 @@ import {
   TEXT2VOICE_MAX_TRACKS,
 } from './src/text2voice-generation';
 import { supportsSystemVoices, type SystemVoice } from './src/host-vocal';
+import { supportsMelodyImport } from './src/import-melody';
 import { silentShuffleAdapter, silentSoundAdapter } from './src/silent-sound';
 import { configMatchesStyle, isStyleId, STYLE_IDS, STYLES, styleAxes, type StyleId } from './src/styles';
 
@@ -123,6 +124,8 @@ function Text2VoiceGroupRow({
   const [sourceMode, setSourceMode] = useState<'quote' | 'write'>('quote');
   const [topic, setTopic] = useState('');
   const [rhymeScheme, setRhymeScheme] = useState<'none' | 'AABB' | 'ABAB'>('none');
+  const [importedTrackDbId, setImportedTrackDbId] = useState<string>('');
+  const [sceneTracks, setSceneTracks] = useState<Array<{ dbId: string; name: string; role?: string }>>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   // The scene shape the GENERATOR will compare against — fetched live, because
   // predicting reusability from the melody's own bpm/bars compares the melody
@@ -161,6 +164,7 @@ function Text2VoiceGroupRow({
         setSourceMode(cfg.sourceMode ?? 'quote');
         setTopic(cfg.topic ?? '');
         setRhymeScheme(cfg.rhymeScheme ?? 'none');
+        setImportedTrackDbId(cfg.melodySource === 'imported' ? (cfg.importedTrackDbId ?? '') : '');
       })
       .catch(() => {});
     void host
@@ -195,6 +199,22 @@ function Text2VoiceGroupRow({
     // and the "sang:" caption reflect what was just written.
   }, [host, scene, configKey, melodyKey, wordsKey, group.members.length, isGenerating]);
 
+  // Scene tracks for the melody-source picker (host-gated; a run adding lanes
+  // refreshes the list via isGenerating).
+  useEffect(() => {
+    let cancelled = false;
+    if (!supportsMelodyImport(host)) return undefined;
+    void (host as unknown as { listSceneTracks(): Promise<Array<{ dbId: string; name: string; role?: string }>> })
+      .listSceneTracks()
+      .then((tracks) => {
+        if (!cancelled) setSceneTracks(tracks);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [host, scene, isGenerating]);
+
   // System voices are host-enumerated (they differ per OS), never hardcoded.
   useEffect(() => {
     let cancelled = false;
@@ -223,6 +243,8 @@ function Text2VoiceGroupRow({
       sourceMode: 'quote' | 'write';
       topic: string;
       rhymeScheme: 'none' | 'AABB' | 'ABAB';
+      melodySource: 'composed' | 'imported';
+      importedTrackDbId: string;
     }>): Promise<void> => {
       if (!scene) return Promise.resolve();
       const next = {
@@ -237,12 +259,14 @@ function Text2VoiceGroupRow({
         sourceMode,
         topic,
         rhymeScheme,
+        melodySource: importedTrackDbId ? ('imported' as const) : ('composed' as const),
+        importedTrackDbId: importedTrackDbId || undefined,
         ...patch,
       };
       if (patch.text !== undefined) textDirty.current = false;
       return host.setSceneData(scene, configKey, next).catch(() => {});
     },
-    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, styleId, sourceMode, topic, rhymeScheme],
+    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, styleId, sourceMode, topic, rhymeScheme, importedTrackDbId],
   );
 
   // The first Generate used to race the textarea's blur-persist: the run read
@@ -274,6 +298,8 @@ function Text2VoiceGroupRow({
       sourceMode,
       topic,
       rhymeScheme,
+      melodySource: importedTrackDbId ? ('imported' as const) : ('composed' as const),
+      importedTrackDbId: importedTrackDbId || undefined,
     },
     scene: sceneShape ?? {
       bpm: melody?.bpm ?? 0,
@@ -306,11 +332,13 @@ function Text2VoiceGroupRow({
 
   const MODE_LABEL: Record<GenerationMode, string> = {
     compose: 'Compose',
+    import: 'Import + Word',
     reword: 'Re-word',
     render: 'Re-render',
   };
   const MODE_HINT: Record<GenerationMode, string> = {
     compose: 'Writes new music and new words. The slow path.',
+    import: 'Reads the chosen track\'s MIDI as the melody (no composing), then fits words to it.',
     reword: 'Keeps the melody; finds new words to fit it. Much faster than composing.',
     render: 'Nothing to compose — re-renders the existing music and words with the current voice.',
   };
@@ -374,6 +402,29 @@ function Text2VoiceGroupRow({
           ))}
         </select>
 
+        {supportsMelodyImport(host) && (
+          <select
+            value={importedTrackDbId}
+            onChange={(e) => {
+              setImportedTrackDbId(e.target.value);
+              void persist({
+                melodySource: e.target.value ? 'imported' : 'composed',
+                importedTrackDbId: e.target.value,
+              });
+            }}
+            title="Melody source — compose new music, or SING an existing track: its MIDI becomes the lead line and the words spread across it."
+            className={SELECT_CLASS}
+            data-testid="text2voice-melody-source"
+          >
+            <option value="">Compose melody</option>
+            {sceneTracks.map((t) => (
+              <option key={t.dbId} value={t.dbId}>
+                Sing: {t.name}
+              </option>
+            ))}
+          </select>
+        )}
+
         <select
           value={harmony}
           onChange={(e) => {
@@ -386,7 +437,13 @@ function Text2VoiceGroupRow({
           data-testid="text2voice-harmony"
         >
           {HARMONY_STYLES.map((h) => (
-            <option key={h} value={h}>
+            <option
+              key={h}
+              value={h}
+              // A composed harmony cannot be jointly written FOR an imported
+              // lead — derived styles only while singing an existing track.
+              disabled={!!importedTrackDbId && ['choral', 'counterpoint', 'cluster'].includes(h)}
+            >
               {h.charAt(0).toUpperCase() + h.slice(1)}
             </option>
           ))}
