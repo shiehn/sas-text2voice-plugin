@@ -5,13 +5,14 @@ import {
   isComposedHarmony,
   normalizeHarmony,
   normalizeVoiceCount,
+  sustainAssignments,
 } from '../harmony-styles';
 import type { PluginMidiNote } from '@signalsandsorcery/plugin-sdk';
 
-const note = (pitch: number, startBeat: number): PluginMidiNote => ({
+const note = (pitch: number, startBeat: number, durationBeats = 0.5): PluginMidiNote => ({
   pitch,
   startBeat,
-  durationBeats: 0.5,
+  durationBeats,
   velocity: 90,
 });
 
@@ -78,6 +79,14 @@ describe('deriveHarmonyVoices', () => {
     expect(voices[2]).toHaveLength(1);
   });
 
+  it('spreads six drone voices to six DISTINCT pitches', () => {
+    // The octave clamp used to fold voices 5/6 back onto 3/4 — two lanes
+    // rendered byte-identical audio.
+    const voices = deriveHarmonyVoices(lead, 'drone', 6, 2, 16);
+    const pitches = voices.slice(1).map((v) => v[0].pitch);
+    expect(new Set(pitches).size).toBe(pitches.length);
+  });
+
   it('keeps derived pitches inside the renderable range', () => {
     const high = [note(84, 0)];
     const voices = deriveHarmonyVoices(high, 'unison', 6, 0, 8);
@@ -101,26 +110,60 @@ describe('assignSyllables', () => {
     expect(out[2].map((a) => a.syllableIndex)).toEqual([0, 1, 2, 3]);
   });
 
-  it('staggers the reading position per voice in canon', () => {
-    const out = assignSyllables(voices, 4, 'canon', 2);
+  it('LOOPS the text when the melody holds more slots than syllables', () => {
+    // Two syllables on four slots: a mantra, not a silent tail.
+    const out = assignSyllables(voices, 2, 'unison');
+    expect(out[0].map((a) => a.syllableIndex)).toEqual([0, 1, 0, 1]);
+  });
+
+  it('canon delays the voice\'s WHOLE line — pitch and text together', () => {
+    const out = assignSyllables(voices, 4, 'canon', { canonOffsetBeats: 1, sceneBeats: 8 });
+    // Voice 0 is the untouched lead.
+    expect(out[0].map((a) => a.note?.startBeat)).toEqual([0, 0.5, 1, 1.5]);
     expect(out[0].map((a) => a.syllableIndex)).toEqual([0, 1, 2, 3]);
-    // Voice 1 starts two syllables late, so its first slots are silent.
-    expect(out[1].map((a) => a.syllableIndex)).toEqual([null, null, 0, 1]);
-    expect(out[2].map((a) => a.syllableIndex)).toEqual([null, null, null, null]);
+    // Voice 1 sings the SAME syllable sequence, one beat later, same pitches.
+    expect(out[1].map((a) => a.syllableIndex)).toEqual([0, 1, 2, 3]);
+    expect(out[1].map((a) => a.note?.startBeat)).toEqual([1, 1.5, 2, 2.5]);
+    expect(out[1].map((a) => a.note?.pitch)).toEqual(out[0].map((a) => a.note?.pitch));
   });
 
-  it('deals consecutive syllables to different voices in hocket', () => {
-    const out = assignSyllables(voices, 4, 'hocket');
-    expect(out[0].map((a) => a.syllableIndex)).toEqual([0, null, null, 3]);
-    expect(out[1].map((a) => a.syllableIndex)).toEqual([null, 1, null, null]);
-    expect(out[2].map((a) => a.syllableIndex)).toEqual([null, null, 2, null]);
+  it('canon wraps at the scene boundary so the round survives the loop seam', () => {
+    const tail = [note(62, 7, 0.5), note(64, 7.5, 0.5)];
+    const out = assignSyllables([tail, tail], 2, 'canon', { canonOffsetBeats: 1, sceneBeats: 8 });
+    // Voice 1's second slot lands at 7.5+1=8.5 → wraps to 0.5.
+    expect(out[1].map((a) => a.note?.startBeat)).toEqual([0, 0.5]);
+    expect(out[1].map((a) => a.syllableIndex)).toEqual([0, 1]);
   });
 
-  it('never assigns a syllable index beyond the phrase', () => {
+  it('hocket deals each slot to exactly one SOUNDING voice — no word vanishes', () => {
+    // Voice 1 rests at slots 1 and 3 (nulls). The rotation must never hand a
+    // syllable to a resting voice.
+    const resting: Array<typeof lead[number] | null> = [lead[0], null, lead[2], null];
+    const out = assignSyllables([lead, resting], 4, 'hocket');
+    for (let slot = 0; slot < 4; slot++) {
+      const singers = out.filter((v) => v[slot].syllableIndex !== null);
+      expect(singers).toHaveLength(1);
+    }
+    // Slots where voice 1 rests fall to the lead.
+    expect(out[0][1].syllableIndex).toBe(1);
+    expect(out[0][3].syllableIndex).toBe(3);
+  });
+
+  it('never assigns a syllable index at or beyond the count', () => {
     const out = assignSyllables(voices, 2, 'unison');
     out.flat().forEach((a) => {
       expect(a.syllableIndex === null || a.syllableIndex < 2).toBe(true);
     });
+  });
+});
+
+describe('sustainAssignments', () => {
+  it('holds one syllable across a pedal tone — a drone, not a chant', () => {
+    const pedal = [note(45, 0, 16)];
+    const out = sustainAssignments(pedal, 0);
+    expect(out).toHaveLength(1);
+    expect(out[0].syllableIndex).toBe(0);
+    expect(out[0].note?.durationBeats).toBe(16);
   });
 });
 

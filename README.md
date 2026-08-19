@@ -151,9 +151,9 @@ syllables did not fit.
   fits rather than to compress the whole text.
 - The phrase is validated against your text before anything is rendered: invented
   words are rejected. The model quotes; it does not write lyrics.
-- Surplus notes are absorbed into their predecessor, so a syllable is *held*
-  longer. This is a sustain, not a true melisma — the renderer holds one pitch
-  per syllable, so a syllable cannot move in pitch while sounding.
+- When the phrase is shorter than the melody, the TEXT LOOPS to fill it (a
+  mantra) — every note sounds. When it is longer, the overflow is dropped from
+  the end and reported.
 - A voice that is almost entirely unvoiced (macOS "Whisper") carries no melody
   and renders as breath. The panel reports this rather than hiding it.
 

@@ -7,6 +7,7 @@ import {
   melodyIsReusable,
   planGeneration,
   planReconcile,
+  type SceneShapeKey,
   type Text2VoiceConfig,
   type Text2VoiceMelody,
   type Text2VoiceWords,
@@ -21,14 +22,28 @@ const config: Text2VoiceConfig = {
   notesPerBeat: 2,
 };
 
-const melody: Text2VoiceMelody = {
-  voices: [[], []],
-  slotCount: 4,
+const scene: SceneShapeKey = {
   bpm: 120,
   bars: 8,
-  harmony: 'choral',
-  delivery: 'unison',
+  key: 'C',
+  mode: 'major',
+  quarterNotesPerBar: 4,
 };
+
+const note = { pitch: 60, startBeat: 0, durationBeats: 1, velocity: 90 };
+
+const melody: Text2VoiceMelody = {
+  voices: [[note], [note]],
+  composedHarmony: 'choral',
+  bpm: 120,
+  bars: 8,
+  key: 'C',
+  mode: 'major',
+  quarterNotesPerBar: 4,
+};
+
+/** A derived-style melody: only the lead is cached; fan-out is render-time. */
+const leadOnly: Text2VoiceMelody = { ...melody, voices: [[note]], composedHarmony: null };
 
 const words: Text2VoiceWords = {
   phrase: 'observable universe',
@@ -41,8 +56,7 @@ const plan = (over: Partial<Parameters<typeof planGeneration>[0]> = {}) =>
     melody,
     words,
     config,
-    bpm: 120,
-    bars: 8,
+    scene,
     wordsStillInSource: true,
     ...over,
   });
@@ -64,6 +78,14 @@ describe('asText2VoiceConfig', () => {
   it('rejects non-objects', () => {
     expect(asText2VoiceConfig(null)).toBeNull();
     expect(asText2VoiceConfig('nope')).toBeNull();
+  });
+
+  it('carries no forceMelody — the one-shot request rides its own key', () => {
+    // As a config field the flag latched forever when a run threw, and any
+    // dropdown persist erased a pending request.
+    const c = asText2VoiceConfig({ text: 'hi', forceMelody: true });
+    expect(c).not.toBeNull();
+    expect('forceMelody' in (c as object)).toBe(false);
   });
 });
 
@@ -88,40 +110,65 @@ describe('asText2VoiceMelody / asText2VoiceWords', () => {
   it('rejects malformed caches rather than replaying garbage', () => {
     expect(asText2VoiceMelody({ voices: 'nope' })).toBeNull();
     expect(asText2VoiceMelody({ voices: [] })).toBeNull();
-    expect(asText2VoiceMelody({ voices: [1, 2] })).toBeNull();
+    expect(asText2VoiceMelody({ ...melody, voices: [[]] })).toBeNull();
     expect(asText2VoiceWords({ phrase: 'x' })).toBeNull();
     expect(asText2VoiceWords({ phrase: 'x', syllables: [] })).toBeNull();
   });
 
-  it('infers slotCount from the lead when an older cache omits it', () => {
-    const m = asText2VoiceMelody({ ...melody, slotCount: undefined, voices: [[1, 2, 3], []] });
-    expect(m!.slotCount).toBe(3);
+  it('rejects legacy caches that cannot prove their key', () => {
+    // Pre-key/mode caches replayed verbatim after a key change — audibly out
+    // of key with no signal. One recompose on first touch is the cheaper cost.
+    const legacy = { voices: [[note]], slotCount: 4, bpm: 120, bars: 8, harmony: 'choral' };
+    expect(asText2VoiceMelody(legacy)).toBeNull();
+  });
+
+  it('treats a derived-style harmony as NOT composed', () => {
+    const m = asText2VoiceMelody({ ...melody, composedHarmony: 'unison' });
+    expect(m!.composedHarmony).toBeNull();
   });
 });
 
 describe('melodyIsReusable', () => {
   it('ignores the settings the user is expected to churn', () => {
-    // Text, character and speech voice must never cost a recompose — that is
-    // the entire point of caching the melody separately.
-    expect(melodyIsReusable(melody, { ...config, text: 'completely different' }, 120, 8)).toBe(true);
-    expect(melodyIsReusable(melody, { ...config, character: 'ghost' }, 120, 8)).toBe(true);
-    expect(melodyIsReusable(melody, { ...config, ttsVoice: 'Zarvox' }, 120, 8)).toBe(true);
+    expect(melodyIsReusable(melody, { ...config, text: 'completely different' }, scene)).toBe(true);
+    expect(melodyIsReusable(melody, { ...config, character: 'ghost' }, scene)).toBe(true);
+    expect(melodyIsReusable(melody, { ...config, ttsVoice: 'Zarvox' }, scene)).toBe(true);
+    // Pace is a render/reword-time knob — never a recompose.
+    expect(melodyIsReusable(melody, { ...config, notesPerBeat: 4 }, scene)).toBe(true);
   });
 
-  it('invalidates when a setting that defines the notes changed', () => {
-    expect(melodyIsReusable(melody, { ...config, harmony: 'organum' }, 120, 8)).toBe(false);
-    expect(melodyIsReusable(melody, { ...config, delivery: 'canon' }, 120, 8)).toBe(false);
-    expect(melodyIsReusable(melody, { ...config, voiceCount: 4 }, 120, 8)).toBe(false);
+  it('never reuses notes written against a different key, mode, or meter', () => {
+    expect(melodyIsReusable(melody, config, { ...scene, key: 'F#' })).toBe(false);
+    expect(melodyIsReusable(melody, config, { ...scene, mode: 'minor' })).toBe(false);
+    expect(melodyIsReusable(melody, config, { ...scene, quarterNotesPerBar: 3 })).toBe(false);
+    expect(melodyIsReusable(melody, config, { ...scene, bpm: 140 })).toBe(false);
+    expect(melodyIsReusable(melody, config, { ...scene, bars: 16 })).toBe(false);
   });
 
-  it('invalidates when the scene shape changed', () => {
-    expect(melodyIsReusable(melody, config, 140, 8)).toBe(false);
-    expect(melodyIsReusable(melody, config, 120, 16)).toBe(false);
+  it('lets DELIVERY change without invalidating — arrangement is render-time', () => {
+    expect(melodyIsReusable(melody, { ...config, delivery: 'canon' }, scene)).toBe(true);
+    expect(melodyIsReusable(leadOnly, { ...config, harmony: 'drone', delivery: 'hocket' }, scene)).toBe(true);
   });
 
-  it('never reuses an absent or empty melody', () => {
-    expect(melodyIsReusable(null, config, 120, 8)).toBe(false);
-    expect(melodyIsReusable({ ...melody, slotCount: 0 }, config, 120, 8)).toBe(false);
+  it('reuses ANY melody for a derived harmony target — the fan-out is recomputed', () => {
+    // Flipping through derived styles must be free, or exploring styles costs
+    // a full compose per click.
+    for (const h of ['unison', 'organum', 'drone'] as const) {
+      expect(melodyIsReusable(leadOnly, { ...config, harmony: h, voiceCount: 5 }, scene)).toBe(true);
+      expect(melodyIsReusable(melody, { ...config, harmony: h }, scene)).toBe(true);
+    }
+  });
+
+  it('requires a matching joint composition for a composed target', () => {
+    expect(melodyIsReusable(melody, { ...config, harmony: 'choral', voiceCount: 2 }, scene)).toBe(true);
+    expect(melodyIsReusable(melody, { ...config, harmony: 'counterpoint' }, scene)).toBe(false);
+    expect(melodyIsReusable(melody, { ...config, harmony: 'choral', voiceCount: 4 }, scene)).toBe(false);
+    // A lead-only cache cannot serve a composed target.
+    expect(melodyIsReusable(leadOnly, { ...config, harmony: 'choral', voiceCount: 2 }, scene)).toBe(false);
+  });
+
+  it('never reuses an absent melody', () => {
+    expect(melodyIsReusable(null, config, scene)).toBe(false);
   });
 });
 
@@ -142,9 +189,15 @@ describe('planGeneration', () => {
     expect(plan({ melody: null })).toBe('compose');
   });
 
-  it('composes when a note-defining setting changed', () => {
+  it('composes when the scene key changed — the notes are simply wrong', () => {
+    expect(plan({ scene: { ...scene, key: 'F#' } })).toBe('compose');
+    expect(plan({ scene: { ...scene, quarterNotesPerBar: 3 } })).toBe('compose');
+  });
+
+  it('composes only for a MISMATCHED composed target, not for derived flips', () => {
     expect(plan({ config: { ...config, harmony: 'cluster' } })).toBe('compose');
-    expect(plan({ config: { ...config, voiceCount: 5 } })).toBe('compose');
+    expect(plan({ config: { ...config, harmony: 'organum', voiceCount: 6 } })).toBe('render');
+    expect(plan({ config: { ...config, delivery: 'canon' } })).toBe('render');
   });
 
   it('composes when the user explicitly asks for new music', () => {
@@ -152,7 +205,6 @@ describe('planGeneration', () => {
   });
 
   it('prefers the cheapest sufficient path — editing text never forces a compose', () => {
-    // The scenario Steve cares about: swap the source text, keep the music.
     expect(plan({ wordsStillInSource: false, config: { ...config, text: 'new passage' } })).toBe(
       'reword',
     );

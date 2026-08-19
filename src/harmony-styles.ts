@@ -13,6 +13,7 @@
  */
 
 import type { PluginMidiNote } from '@signalsandsorcery/plugin-sdk';
+import { shiftSlotsWrapped } from './distribute';
 
 export const HARMONY_STYLES = [
   'unison',
@@ -158,10 +159,12 @@ export function deriveHarmonyVoices(
         break;
       }
       case 'drone': {
-        // One sustained note for the whole phrase: tonic, then fifth, then
-        // tonic an octave down, alternating outward.
+        // One sustained note for the whole phrase. Tonic and fifth first, then
+        // the octave BELOW, then the octave ABOVE — never further down, because
+        // the low clamp used to fold voices 5/6 back onto 3/4 and render two
+        // lanes byte-identical.
         const degree = v % 2 === 1 ? 0 : 7;
-        const octave = -12 * Math.floor((v - 1) / 2);
+        const octave = [0, 0, -12, -12, 12, 12][Math.min(v - 1, 5)];
         const base = clampPitch(48 + tonicPc + degree + octave);
         voices.push([
           {
@@ -199,43 +202,86 @@ export interface VoiceSyllableAssignment {
 }
 
 /**
- * Deal `syllableCount` syllables onto each voice's notes according to the
- * delivery mode. Every voice keeps its own notes; only WHICH syllable (if any)
- * lands on each note changes.
+ * Deal syllables onto each voice's slots according to the delivery mode.
  *
- * `canon` offsets each voice's reading position so the same sentence overlaps
- * itself; `hocket` gives each consecutive syllable to a different voice and
- * rests the others.
+ * Slot index maps to syllable `index % syllableCount` — the text LOOPS when
+ * the melody holds more slots than the phrase has syllables, so every note
+ * sounds (a mantra) instead of the tail falling silent.
+ *
+ * `canon` delays each voice's WHOLE line — pitch and text together — by
+ * `canonOffsetBeats` per voice, wrapping at the scene boundary so the round
+ * survives the loop seam. `hocket` deals each slot to exactly one voice,
+ * rotating among the voices actually SOUNDING there (a resting voice never
+ * swallows a word; the lead is always a sounding fallback).
  */
+export interface AssignOptions {
+  /** Beats each successive canon voice enters late. */
+  canonOffsetBeats?: number;
+  /** Scene length in quarter-note beats — required for canon's wrap. */
+  sceneBeats?: number;
+}
+
 export function assignSyllables(
   voices: Array<Array<PluginMidiNote | null>>,
   syllableCount: number,
   delivery: DeliveryMode,
-  canonOffsetSyllables = 2,
+  opts: AssignOptions = {},
 ): VoiceSyllableAssignment[][] {
-  return voices.map((notes, voiceIndex) =>
-    notes.map((note, noteIndex) => {
-      let syllableIndex: number | null;
-      switch (delivery) {
-        case 'canon': {
-          const shifted = noteIndex - voiceIndex * canonOffsetSyllables;
-          syllableIndex = shifted >= 0 && shifted < syllableCount ? shifted : null;
-          break;
-        }
-        case 'hocket':
-          syllableIndex =
-            noteIndex % voices.length === voiceIndex && noteIndex < syllableCount
-              ? noteIndex
-              : null;
-          break;
-        case 'unison':
-        default:
-          syllableIndex = noteIndex < syllableCount ? noteIndex : null;
-          break;
+  if (syllableCount <= 0) return voices.map(() => []);
+  const sylAt = (slotIndex: number): number => slotIndex % syllableCount;
+
+  if (delivery === 'canon') {
+    const offset = opts.canonOffsetBeats ?? 2;
+    const sceneBeats = opts.sceneBeats ?? 0;
+    return voices.map((notes, voiceIndex) => {
+      if (voiceIndex === 0 || sceneBeats <= 0) {
+        return notes.map((note, i) => ({ syllableIndex: note ? sylAt(i) : null, note }));
       }
-      return { syllableIndex, note };
-    }),
+      // Delay the voice's own (pitch, syllable) line as a unit.
+      const shifted = shiftSlotsWrapped(notes, voiceIndex * offset, sceneBeats);
+      return shifted.map(({ note, sourceIndex }) => ({
+        syllableIndex: sylAt(sourceIndex),
+        note,
+      }));
+    });
+  }
+
+  if (delivery === 'hocket') {
+    // Precompute, per slot, which voices are sounding — the rotation must only
+    // ever land on one of them or the syllable is sung by nobody.
+    const slotCount = voices[0]?.length ?? 0;
+    const winner: number[] = [];
+    for (let i = 0; i < slotCount; i++) {
+      const sounding = voices
+        .map((notes, v) => (notes[i] ? v : -1))
+        .filter((v) => v >= 0);
+      winner.push(sounding.length === 0 ? -1 : sounding[i % sounding.length]);
+    }
+    return voices.map((notes, voiceIndex) =>
+      notes.map((note, i) => ({
+        syllableIndex: winner[i] === voiceIndex && note ? sylAt(i) : null,
+        note,
+      })),
+    );
+  }
+
+  // unison
+  return voices.map((notes) =>
+    notes.map((note, i) => ({ syllableIndex: note ? sylAt(i) : null, note })),
   );
+}
+
+/**
+ * A sustain lane: ONE syllable held across the voice's one long note — how a
+ * drone renders. Bypasses the slot grid entirely: aligning a pedal tone to the
+ * lead's slots would chop it into per-syllable re-attacks (a chant), which is
+ * exactly the regression this exists to prevent.
+ */
+export function sustainAssignments(
+  notes: PluginMidiNote[],
+  syllableIndex: number,
+): VoiceSyllableAssignment[] {
+  return notes.map((note) => ({ syllableIndex, note }));
 }
 
 // ---------------------------------------------------------------------------

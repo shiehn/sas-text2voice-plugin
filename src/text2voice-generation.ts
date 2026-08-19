@@ -37,6 +37,8 @@ import {
   assignSyllables,
   deriveHarmonyVoices,
   isComposedHarmony,
+  sustainAssignments,
+  type VoiceSyllableAssignment,
 } from './harmony-styles';
 import {
   CompositionError,
@@ -72,10 +74,12 @@ import {
   planGeneration,
   planReconcile,
   TEXT2VOICE_CONFIG_KEY,
+  TEXT2VOICE_FORCE_KEY,
   TEXT2VOICE_MELODY_KEY,
   TEXT2VOICE_VOICE_META_KEY,
   TEXT2VOICE_WORDS_KEY,
   type GenerationMode,
+  type SceneShapeKey,
   type Text2VoiceConfig,
   type Text2VoiceMelody,
   type Text2VoiceMeta,
@@ -145,19 +149,36 @@ export async function generateText2Voice(
   );
   const words = asText2VoiceWords(await host.getSceneData(scene, wordsKey).catch(() => null));
 
+  // The one-shot "compose new music" request lives under its OWN key and is
+  // consumed HERE, before any expensive work — as a config field it used to
+  // latch forever when a run threw, silently recomposing on every later press.
+  const forceKey = services.trackDataKey(anchorDbId, TEXT2VOICE_FORCE_KEY);
+  const forceMelody =
+    (await host.getSceneData(scene, forceKey).catch(() => null)) === true;
+  if (forceMelody) {
+    await host.deleteSceneData(scene, forceKey).catch(() => {});
+  }
+
   // A phrase that is no longer present in the text has to be replaced; a phrase
   // that is still there is kept, which is what lets the user edit the passage
   // around it without paying to compose again.
   const wordsStillInSource = words ? validatePhraseInSource(words.phrase, config.text).ok : false;
 
+  const sceneShape: SceneShapeKey = {
+    bpm,
+    bars,
+    key: musical.key,
+    mode: musical.mode,
+    quarterNotesPerBar: qnPerBar,
+  };
+
   const mode: GenerationMode = planGeneration({
     melody,
     words,
     config,
-    bpm,
-    bars,
+    scene: sceneShape,
     wordsStillInSource,
-    forceMelody: config.forceMelody === true,
+    forceMelody,
   });
 
   let finalMelody: Text2VoiceMelody;
@@ -179,23 +200,24 @@ export async function generateText2Voice(
     await host.setSceneData(scene, melodyKey, finalMelody).catch(() => {});
     await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
   } else if (mode === 'reword') {
-    // The melody survives; only the words are re-chosen, to its exact length.
+    // The melody survives; only the words are re-chosen. The capacity target is
+    // computed LIVE at the current pace — a stored count went stale the moment
+    // the user touched the Pace control.
     finalMelody = melody as Text2VoiceMelody;
-    finalWords = await rewordOntoMelody(host, config, finalMelody.slotCount);
+    finalWords = await rewordOntoMelody(
+      host,
+      config,
+      melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
+    );
     await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
   } else {
     finalMelody = melody as Text2VoiceMelody;
     finalWords = words as Text2VoiceWords;
   }
 
-  // The force flag is a one-shot request, not a stored preference.
-  if (config.forceMelody) {
-    config.forceMelody = false;
-  }
-
   // Spread the phrase across the melody. The LEAD's subdivided slots become
-  // the syllable timeline; every other voice supplies pitch at those same
-  // moments, so unison and choral stay locked together.
+  // the syllable timeline; every other voice supplies pitch at those moments,
+  // so unison and choral stay locked together.
   const syllables = finalWords.syllables;
   const spread = distributeSyllables(
     finalMelody.voices[0],
@@ -203,13 +225,43 @@ export async function generateText2Voice(
     config.notesPerBeat,
   );
   const leadSlots = spread.notes;
+
+  // Harmony voices are RENDER-TIME for derived styles: the cache holds only
+  // the composed lead, and the fan-out (unison / organum / drone) is recomputed
+  // here — which is what makes flipping styles free.
+  const composed = isComposedHarmony(config.harmony);
+  const harmonyVoices: PluginMidiNote[][] = composed
+    ? finalMelody.voices.slice(1)
+    : deriveHarmonyVoices(
+        finalMelody.voices[0],
+        config.harmony,
+        config.voiceCount,
+        tonicPcFor(musical.key) ?? 0,
+        totalBeats,
+      ).slice(1);
+  const laneCount = 1 + harmonyVoices.length;
+
+  // Drone lanes SUSTAIN — one syllable held across the pedal tone. Aligning
+  // them to the slot grid would chop the pedal into per-syllable re-attacks.
+  const sustainLane = (v: PluginMidiNote[]): boolean =>
+    !composed && config.harmony === 'drone' && v.length === 1;
+
   const voices: Array<Array<PluginMidiNote | null>> = [
     leadSlots,
-    ...finalMelody.voices.slice(1).map((v) => alignVoiceToSlots(v, leadSlots)),
+    ...harmonyVoices.map((v) => (sustainLane(v) ? [] : alignVoiceToSlots(v, leadSlots))),
   ];
 
   // --- delivery: which syllable lands on which note -------------------------
-  const assignments = assignSyllables(voices, spread.used, config.delivery);
+  const assignments: VoiceSyllableAssignment[][] = assignSyllables(
+    voices,
+    spread.used > 0 ? Math.min(syllables.length, spread.used) : syllables.length,
+    config.delivery,
+    { canonOffsetBeats: 2, sceneBeats: totalBeats },
+  );
+  // Sustain lanes bypass the grid: their one long note holds the first syllable.
+  harmonyVoices.forEach((v, i) => {
+    if (sustainLane(v)) assignments[i + 1] = sustainAssignments(v, 0);
+  });
 
   if (spread.dropped > 0) {
     host.showToast(
@@ -229,7 +281,7 @@ export async function generateText2Voice(
       }))
     : [{ dbId: anchorDbId, engineId: track.handle.id, voiceIndex: 0 }];
 
-  const plan = planReconcile(existing, finalMelody.voices.length);
+  const plan = planReconcile(existing, laneCount);
 
   if (services.tracks.length + plan.createBucketIndexes.length > TEXT2VOICE_MAX_TRACKS) {
     throw new Error(
@@ -239,6 +291,7 @@ export async function generateText2Voice(
 
   const created: PluginTrackHandle[] = [];
   const lanes: Array<{ dbId: string; engineId: string; voiceIndex: number }> = [];
+  const silentLanes: string[] = [];
 
   try {
     for (const r of plan.reuse) lanes.push({ ...r, voiceIndex: r.bucketIndex });
@@ -256,19 +309,31 @@ export async function generateText2Voice(
         syllables,
         config.character,
         lane.voiceIndex,
-        finalMelody.voices.length,
+        laneCount,
         bpm,
         totalBeats,
         config.ttsVoice,
       );
-      if (request.syllables.length === 0) continue;
+      if (request.syllables.length === 0) {
+        // A lane that falls silent this run (canon offset past the phrase,
+        // hocket with more voices than syllables) must not keep LAST run's
+        // audio playing. There is no clear-clip host call, so mute it and say
+        // so — an honest silence.
+        await host.setTrackMute(lane.engineId, true).catch(() => {});
+        await host.setTrackRole?.(lane.engineId, 'vocals').catch(() => {});
+        silentLanes.push(voiceLabel(lane.voiceIndex));
+        continue;
+      }
 
       const result = await vocalHost.renderVocalLine(request);
       await host.writeAudioClip(lane.engineId, result.filePath);
       // 'vocals' is already a first-class role, so no host change is needed.
       await host.setTrackRole?.(lane.engineId, 'vocals').catch(() => {});
-      // Spawn muted, like every other family — the user unmutes deliberately.
-      await host.setTrackMute(lane.engineId, true).catch(() => {});
+      // Only lanes CREATED this run spawn muted — re-muting a reused lane the
+      // user deliberately unmuted reads as "the render failed".
+      if (created.some((c) => c.id === lane.engineId)) {
+        await host.setTrackMute(lane.engineId, true).catch(() => {});
+      }
 
       if (result.unvoicedIndices.length >= request.syllables.length) {
         host.showToast(
@@ -277,6 +342,14 @@ export async function generateText2Voice(
           'That speech voice is almost entirely unvoiced, so it carries no pitch. Pick another voice for a melodic line.',
         );
       }
+    }
+
+    if (silentLanes.length > 0) {
+      host.showToast(
+        'info',
+        `${silentLanes.length} lane(s) silent this arrangement`,
+        `${silentLanes.join(', ')} had nothing to sing and were muted.`,
+      );
     }
 
     // --- metas + config last ------------------------------------------------
@@ -288,7 +361,7 @@ export async function generateText2Voice(
       };
       await host.setSceneData(scene, services.trackDataKey(lane.dbId, TEXT2VOICE_VOICE_META_KEY), meta);
     }
-    await host.setSceneData(scene, configKey, { ...config, voiceCount: finalMelody.voices.length, forceMelody: false });
+    await host.setSceneData(scene, configKey, { ...config, voiceCount: laneCount });
   } catch (err) {
     // LIFO rollback: only tracks THIS run created.
     for (const handle of [...created].reverse()) {
@@ -407,8 +480,9 @@ async function rewordOntoMelody(
   if (!splitOk.ok) {
     throw new Error(`The syllable split was unusable (${splitOk.reason}). Try generating again.`);
   }
-  // A length mismatch is NOT fatal — the reconciler holds notes longer or trims
-  // the tail — so it is left to the caller rather than failing the whole run.
+  // A length mismatch is NOT fatal — a short phrase loops onto the melody, a
+  // long one is trimmed and reported — so it is left to the distribution layer
+  // rather than failing the whole run.
   return { phrase, syllables };
 }
 
@@ -509,16 +583,18 @@ async function composeFromText(
     );
   }
 
+  // Derived styles cache ONLY the lead: the fan-out is recomputed at every
+  // render, so stale derived lines can never shadow a harmony change.
+  const composed = isComposedHarmony(config.harmony);
   return {
     melody: {
-      voices,
-      // How much text this melody can hold at the current rate — what the
-      // reword path asks the model to aim for.
-      slotCount: melodyCapacity(voices[0], config.notesPerBeat),
+      voices: composed ? voices : [voices[0]],
+      composedHarmony: composed ? config.harmony : null,
       bpm: shape.bpm,
       bars: shape.bars,
-      harmony: config.harmony,
-      delivery: config.delivery,
+      key: shape.key,
+      mode: shape.mode,
+      quarterNotesPerBar: shape.quarterNotesPerBar,
     },
     words: { phrase: parsed.phrase, syllables: parsed.syllables },
   };

@@ -2,7 +2,7 @@
  * Text2Voice voice-group metadata — the ensemble plugin's voice-group shape.
  * Membership is per-member scene-data under `track:<dbId>:text2voiceVoice`;
  * the anchor is voiceIndex 0 and holds the group's config (including the
- * source text) plus the cached composition.
+ * source text) plus the cached melody and words.
  */
 
 import type {
@@ -13,6 +13,7 @@ import type {
   PluginMidiNote,
 } from '@signalsandsorcery/plugin-sdk';
 import {
+  isComposedHarmony,
   normalizeCharacter,
   normalizeDelivery,
   normalizeHarmony,
@@ -23,12 +24,19 @@ import {
 } from './harmony-styles';
 
 export const TEXT2VOICE_VOICE_META_KEY = 'text2voiceVoice';
-/** Anchor-held config: the source text plus the three intent axes. */
+/** Anchor-held config: the source text plus the intent axes. */
 export const TEXT2VOICE_CONFIG_KEY = 'text2voiceConfig';
 /** Anchor-held cache of the composed music (the expensive artifact). */
 export const TEXT2VOICE_MELODY_KEY = 'text2voiceMelody';
 /** Anchor-held cache of the words currently sitting on that music. */
 export const TEXT2VOICE_WORDS_KEY = 'text2voiceWords';
+/**
+ * One-shot "compose new music" request. Its OWN key, never part of the config
+ * object: as a config field it latched forever when a run threw before the
+ * end-of-run clear, and any unrelated `persist()` erased a pending request.
+ * The generator deletes it at READ time, before any expensive work.
+ */
+export const TEXT2VOICE_FORCE_KEY = 'text2voiceForceMelody';
 
 /** Guards a pathological paste; scenes hold at most a page or so of prose. */
 export const MAX_TEXT_LENGTH = 20000;
@@ -40,21 +48,17 @@ export interface Text2VoiceMeta {
   voiceIndex: number;
   /** Label shown in the voice row ("lead", "harmony 2"). */
   label: string;
-  /** System speech voice this lane speaks with, when pinned. */
-  ttsVoice?: string;
 }
 
 export function asText2VoiceMeta(val: unknown): Text2VoiceMeta | null {
   if (!val || typeof val !== 'object') return null;
   const m = val as Partial<Text2VoiceMeta>;
   if (typeof m.groupId !== 'string' || typeof m.voiceIndex !== 'number') return null;
-  const meta: Text2VoiceMeta = {
+  return {
     groupId: m.groupId,
     voiceIndex: m.voiceIndex,
     label: typeof m.label === 'string' ? m.label : '',
   };
-  if (typeof m.ttsVoice === 'string') meta.ttsVoice = m.ttsVoice;
-  return meta;
 }
 
 export const text2voiceGroupSpec: GroupParseSpec<Text2VoiceMeta> = {
@@ -96,14 +100,8 @@ export interface Text2VoiceConfig {
   voiceCount: number;
   /** Notes per quarter-note beat: 1 = quarters, 2 = eighths, 4 = sixteenths. */
   notesPerBeat: number;
-  /** System speech voice for the group; per-lane pins override it. */
+  /** System speech voice for the group. */
   ttsVoice?: string;
-  /**
-   * Set by the panel's "New melody" action and cleared by the next generate.
-   * A transient request, not a preference — it lives here only because the
-   * core's generate handler takes a track id and carries no payload.
-   */
-  forceMelody?: boolean;
 }
 
 export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
@@ -118,27 +116,42 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
     notesPerBeat: c.notesPerBeat === 1 || c.notesPerBeat === 2 || c.notesPerBeat === 4 ? c.notesPerBeat : 2,
   };
   if (typeof c.ttsVoice === 'string') config.ttsVoice = c.ttsVoice;
-  if (c.forceMelody === true) config.forceMelody = true;
   return config;
 }
 
 // --- anchor-held caches: MELODY and WORDS are stored SEPARATELY ---------
 //
 // Composing the music is the expensive step, so it is cached independently of
-// the words sitting on it. Replacing the text therefore keeps the melody and
-// costs only a small phrase-selection call; changing the character or speech
-// voice costs nothing at all. Only the settings that genuinely define the notes
-// — harmony, delivery, voice count, tempo and length — throw the melody away.
+// the words sitting on it. Replacing the text keeps the melody and costs only
+// a small phrase-selection call; changing the character or speech voice costs
+// nothing at all.
+//
+// The melody stores the settings that DEFINED its notes — key, mode, meter,
+// tempo, length — and, when it was a joint multi-voice composition, which
+// composed style wrote it. It deliberately does NOT store delivery or (for
+// derived styles) the harmony fan-out: delivery is pure render-time
+// arrangement, and derived harmonies (unison / organum / drone) are always
+// re-derived from the cached lead at render time. Without that, flipping
+// through styles would cost a full compose per click.
 
 export interface Text2VoiceMelody {
-  /** One note array per voice, index 0 = lead. */
+  /**
+   * The composed voices. For a COMPOSED harmony (choral / counterpoint /
+   * cluster) this is all N jointly-written lines, highest first. For a derived
+   * harmony only the LEAD is stored — the fan-out is recomputed at render.
+   */
   voices: PluginMidiNote[][];
-  /** Syllable slots the lead provides — the exact length a phrase must fit. */
-  slotCount: number;
+  /**
+   * The composed style that wrote `voices` as a joint texture, or null when
+   * only a lead line was composed (derived styles).
+   */
+  composedHarmony: HarmonyStyle | null;
+  /** Scene shape the notes were written against — all of it invalidates. */
   bpm: number;
   bars: number;
-  harmony: HarmonyStyle;
-  delivery: DeliveryMode;
+  key: string;
+  mode: string;
+  quarterNotesPerBar: number;
 }
 
 export interface Text2VoiceWords {
@@ -150,16 +163,28 @@ export interface Text2VoiceWords {
 
 export function asText2VoiceMelody(val: unknown): Text2VoiceMelody | null {
   if (!val || typeof val !== 'object') return null;
-  const m = val as Partial<Text2VoiceMelody>;
+  const m = val as Partial<Text2VoiceMelody> & { harmony?: unknown };
   if (!Array.isArray(m.voices) || !m.voices.every((v) => Array.isArray(v))) return null;
-  if (m.voices.length === 0) return null;
+  if (m.voices.length === 0 || (m.voices[0] as unknown[]).length === 0) return null;
+
+  // Legacy caches (pre key/mode fields) stored `harmony` and derived fan-outs
+  // in `voices`. They cannot prove which key they were written in, so they are
+  // rejected — one recompose on first touch beats replaying in the wrong key.
+  if (typeof m.key !== 'string' || typeof m.mode !== 'string') return null;
+
+  const composedHarmony =
+    typeof m.composedHarmony === 'string' && isComposedHarmony(normalizeHarmony(m.composedHarmony))
+      ? normalizeHarmony(m.composedHarmony)
+      : null;
+
   return {
     voices: m.voices as PluginMidiNote[][],
-    slotCount: typeof m.slotCount === 'number' ? m.slotCount : (m.voices[0]?.length ?? 0),
+    composedHarmony,
     bpm: typeof m.bpm === 'number' ? m.bpm : 120,
     bars: typeof m.bars === 'number' ? m.bars : 4,
-    harmony: normalizeHarmony(m.harmony),
-    delivery: normalizeDelivery(m.delivery),
+    key: m.key,
+    mode: m.mode,
+    quarterNotesPerBar: typeof m.quarterNotesPerBar === 'number' ? m.quarterNotesPerBar : 4,
   };
 }
 
@@ -172,26 +197,44 @@ export function asText2VoiceWords(val: unknown): Text2VoiceWords | null {
   return { phrase: w.phrase, syllables };
 }
 
+/** The live scene shape a cached melody must still describe. */
+export interface SceneShapeKey {
+  bpm: number;
+  bars: number;
+  key: string;
+  mode: string;
+  quarterNotesPerBar: number;
+}
+
 /**
  * Whether a cached melody still describes the current settings.
  *
- * Deliberately NOT sensitive to the source text, the character or the speech
- * voice — those are what the user is expected to churn, and keeping the melody
- * across them is the whole point of splitting the caches.
+ * Two-sided by design:
+ * - STRICT about the scene shape (key, mode, meter, tempo, length): the
+ *   absolute pitches were baked against them, so any change means the notes
+ *   are simply wrong — recompose.
+ * - RELAXED about arrangement: delivery NEVER invalidates, and a DERIVED
+ *   harmony target (unison / organum / drone) needs only the cached lead —
+ *   voice count and derived-style changes re-fan at render time. Only a
+ *   COMPOSED target that differs from what was jointly written (or whose
+ *   voice count differs) forces a compose.
  */
 export function melodyIsReusable(
   melody: Text2VoiceMelody | null,
   config: Text2VoiceConfig,
-  bpm: number,
-  bars: number,
+  scene: SceneShapeKey,
 ): boolean {
   if (!melody) return false;
-  if (melody.harmony !== config.harmony) return false;
-  if (melody.delivery !== config.delivery) return false;
-  if (melody.voices.length !== config.voiceCount) return false;
-  if (melody.bars !== bars) return false;
-  if (Math.abs(melody.bpm - bpm) > 0.01) return false;
-  return melody.slotCount > 0;
+  if (melody.bars !== scene.bars) return false;
+  if (Math.abs(melody.bpm - scene.bpm) > 0.01) return false;
+  if (melody.key !== scene.key || melody.mode !== scene.mode) return false;
+  if (melody.quarterNotesPerBar !== scene.quarterNotesPerBar) return false;
+
+  if (isComposedHarmony(config.harmony)) {
+    return melody.composedHarmony === config.harmony && melody.voices.length === config.voiceCount;
+  }
+  // Derived target: any melody with a lead will do — the fan-out is render-time.
+  return melody.voices[0].length > 0;
 }
 
 /** What a generate run actually has to do. */
@@ -208,16 +251,15 @@ export function planGeneration(params: {
   melody: Text2VoiceMelody | null;
   words: Text2VoiceWords | null;
   config: Text2VoiceConfig;
-  bpm: number;
-  bars: number;
+  scene: SceneShapeKey;
   /** The phrase still occurs in the current source text. */
   wordsStillInSource: boolean;
-  /** User explicitly asked for a new melody. */
+  /** User explicitly asked for a new melody (the one-shot key). */
   forceMelody?: boolean;
 }): GenerationMode {
-  const { melody, words, config, bpm, bars, wordsStillInSource, forceMelody } = params;
+  const { melody, words, config, scene, wordsStillInSource, forceMelody } = params;
   if (forceMelody) return 'compose';
-  if (!melodyIsReusable(melody, config, bpm, bars)) return 'compose';
+  if (!melodyIsReusable(melody, config, scene)) return 'compose';
   if (!words || !wordsStillInSource) return 'reword';
   return 'render';
 }

@@ -18,7 +18,7 @@
  * the controls exist BEFORE the first expensive generation.
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   PluginUIProps,
   PluginHost,
@@ -32,6 +32,7 @@ import {
   useGeneratorPanelCore,
   ConfirmDialog,
   GroupCollapseChevron,
+  panelQuarterNotesPerBar,
   useRegenerateGuard,
 } from '@signalsandsorcery/plugin-sdk';
 import {
@@ -60,10 +61,12 @@ import {
   text2voiceGroupIsComplete,
   text2voiceGroupSpec,
   TEXT2VOICE_CONFIG_KEY,
+  TEXT2VOICE_FORCE_KEY,
   TEXT2VOICE_MELODY_KEY,
   TEXT2VOICE_VOICE_META_KEY,
   TEXT2VOICE_WORDS_KEY,
   type GenerationMode,
+  type SceneShapeKey,
   type Text2VoiceMelody,
   type Text2VoiceMeta,
 } from './src/voice-meta';
@@ -115,6 +118,15 @@ function Text2VoiceGroupRow({
   const [lastPhrase, setLastPhrase] = useState<string>('');
   const [melody, setMelody] = useState<Text2VoiceMelody | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // The scene shape the GENERATOR will compare against — fetched live, because
+  // predicting reusability from the melody's own bpm/bars compares the melody
+  // with itself and can never foresee a compose caused by a tempo change.
+  const [sceneShape, setSceneShape] = useState<SceneShapeKey | null>(null);
+  // Guards the pasted text against the load effect: once the user has typed,
+  // background re-reads (a run finishing, a member count change) must never
+  // clobber the textarea.
+  const textDirty = useRef(false);
+  const seededAnchor = useRef<string | null>(null);
 
   const isGenerating = group.members.some((m) => m.track.isGenerating);
 
@@ -127,7 +139,12 @@ function Text2VoiceGroupRow({
       .then((raw) => {
         const cfg = asText2VoiceConfig(raw);
         if (!cfg || cancelled) return;
-        setText(cfg.text);
+        // The TEXT seeds once per anchor and never overwrites typing-in-flight;
+        // the dropdowns are cheap to resync and never hold unsaved keystrokes.
+        if (seededAnchor.current !== anchor.dbId && !textDirty.current) {
+          seededAnchor.current = anchor.dbId;
+          setText(cfg.text);
+        }
         setHarmony(cfg.harmony);
         setDelivery(cfg.delivery);
         setCharacter(cfg.character);
@@ -147,6 +164,19 @@ function Text2VoiceGroupRow({
       .then((raw) => {
         const w = asText2VoiceWords(raw);
         if (w && !cancelled) setLastPhrase(w.phrase);
+      })
+      .catch(() => {});
+    void host
+      .getMusicalContext()
+      .then((mc) => {
+        if (cancelled) return;
+        setSceneShape({
+          bpm: mc.bpm,
+          bars: mc.bars,
+          key: mc.key,
+          mode: mc.mode,
+          quarterNotesPerBar: panelQuarterNotesPerBar(mc),
+        });
       })
       .catch(() => {});
     return () => {
@@ -171,28 +201,39 @@ function Text2VoiceGroupRow({
     };
   }, [host]);
 
-  const persist = (patch: Partial<{
-    text: string;
-    harmony: HarmonyStyle;
-    delivery: DeliveryMode;
-    character: Character;
-    voiceCount: number;
-    ttsVoice: string;
-    notesPerBeat: number;
-  }>): void => {
-    if (!scene) return;
-    const next = {
-      text,
-      harmony,
-      delivery,
-      character,
-      voiceCount,
-      ttsVoice,
-      notesPerBeat: pace,
-      ...patch,
-    };
-    void host.setSceneData(scene, configKey, next).catch(() => {});
-  };
+  const persist = useCallback(
+    (patch: Partial<{
+      text: string;
+      harmony: HarmonyStyle;
+      delivery: DeliveryMode;
+      character: Character;
+      voiceCount: number;
+      ttsVoice: string;
+      notesPerBeat: number;
+    }>): Promise<void> => {
+      if (!scene) return Promise.resolve();
+      const next = {
+        text,
+        harmony,
+        delivery,
+        character,
+        voiceCount,
+        ttsVoice,
+        notesPerBeat: pace,
+        ...patch,
+      };
+      if (patch.text !== undefined) textDirty.current = false;
+      return host.setSceneData(scene, configKey, next).catch(() => {});
+    },
+    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace],
+  );
+
+  // The first Generate used to race the textarea's blur-persist: the run read
+  // the OLD config and threw "Paste some text first" with text visibly present.
+  // Persisting explicitly before dispatch closes that window.
+  const generateNow = useCallback((): void => {
+    void persist({ text }).then(() => ctx.handlers.generate(anchorTrack.handle.id));
+  }, [persist, text, ctx.handlers, anchorTrack.handle.id]);
 
   const memberEngineIds = group.members.map((m) => m.track.handle.id);
   const allMuted = group.members.every((m) => m.track.runtimeState.muted);
@@ -204,7 +245,7 @@ function Text2VoiceGroupRow({
   // making the user find out by waiting.
   const plannedMode: GenerationMode = planGeneration({
     melody,
-    words: lastPhrase ? { phrase: lastPhrase, syllables: [] } : null,
+    words: lastPhrase ? { phrase: lastPhrase, syllables: ['x'] } : null,
     config: {
       text,
       harmony,
@@ -213,8 +254,13 @@ function Text2VoiceGroupRow({
       voiceCount,
       notesPerBeat: pace,
     },
-    bpm: melody?.bpm ?? 0,
-    bars: melody?.bars ?? 0,
+    scene: sceneShape ?? {
+      bpm: melody?.bpm ?? 0,
+      bars: melody?.bars ?? 0,
+      key: melody?.key ?? '',
+      mode: melody?.mode ?? '',
+      quarterNotesPerBar: melody?.quarterNotesPerBar ?? 4,
+    },
     wordsStillInSource: lastPhrase ? validatePhraseInSource(lastPhrase, text).ok : false,
   });
 
@@ -231,7 +277,7 @@ function Text2VoiceGroupRow({
 
   const regenerate = useRegenerateGuard({
     hasMidi: lastPhrase.length > 0,
-    onGenerate: () => ctx.handlers.generate(anchorTrack.handle.id),
+    onGenerate: generateNow,
     subject: 'This reading',
     detail: `All ${group.members.length} ${
       group.members.length === 1 ? 'voice is' : 'voices are'
@@ -240,6 +286,10 @@ function Text2VoiceGroupRow({
   });
 
   const handleVoiceDelete = (member: (typeof group.members)[number]): void => {
+    // The anchor (voice 0) holds ALL the group's scene-data — text, melody,
+    // words. Deleting it orphans the reading, so its row never offers delete;
+    // removing the whole reading goes through the group ✕.
+    if (member.meta.voiceIndex === 0) return;
     void ctx.deleteGroup(
       [{ engineId: member.track.handle.id, dbId: member.dbId }],
       [TEXT2VOICE_VOICE_META_KEY, 'prompt', 'role', 'groupUi'],
@@ -372,17 +422,11 @@ function Text2VoiceGroupRow({
         <button
           onClick={() => {
             if (!scene) return;
+            // The request rides its OWN one-shot key: as a config field it
+            // latched on failed runs and was erased by any dropdown persist.
             void host
-              .setSceneData(scene, configKey, {
-                text,
-                harmony,
-                delivery,
-                character,
-                voiceCount,
-                ttsVoice,
-                notesPerBeat: pace,
-                forceMelody: true,
-              })
+              .setSceneData(scene, ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_FORCE_KEY), true)
+              .then(() => persist({ text }))
               .then(() => ctx.handlers.generate(anchorTrack.handle.id))
               .catch(() => {});
           }}
@@ -438,8 +482,11 @@ function Text2VoiceGroupRow({
               placeholder="Paste text here — an article, a paragraph, anything. A phrase from it will be quoted and sung."
               maxLength={MAX_TEXT_LENGTH}
               rows={5}
-              onChange={(e) => setText(e.target.value)}
-              onBlur={() => persist({ text })}
+              onChange={(e) => {
+                textDirty.current = true;
+                setText(e.target.value);
+              }}
+              onBlur={() => void persist({ text })}
               className="w-full resize-y bg-sas-panel border border-sas-border rounded-sm px-2 py-1.5 text-xs leading-relaxed text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
               data-testid="text2voice-text"
             />

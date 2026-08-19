@@ -78,9 +78,9 @@ describe('buildVocalLineRequest', () => {
   });
 
   it('yields an empty request when the lane is entirely rests', () => {
-    // Voice 2 of a 3-voice canon offset past the end of the phrase.
-    const assignments = assignSyllables([lead, lead, lead], SYLLABLES.length, 'canon', 4)[2];
-    const req = buildVocalLineRequest(assignments, SYLLABLES, 'natural', 2, 3, 120, 4);
+    const silent: Array<(typeof lead)[number] | null> = [null, null, null, null];
+    const assignments = assignSyllables([lead, silent], SYLLABLES.length, 'unison')[1];
+    const req = buildVocalLineRequest(assignments, SYLLABLES, 'natural', 1, 2, 120, 4);
     expect(req.syllables).toHaveLength(0);
   });
 

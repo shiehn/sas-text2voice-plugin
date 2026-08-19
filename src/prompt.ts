@@ -182,7 +182,9 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     '',
     '## The scene',
     `- Key: ${ctx.key} ${ctx.mode}. Time signature: ${ctx.timeSignature}. Tempo: ${Math.round(ctx.bpm)} BPM.`,
-    `- Length: ${ctx.bars} bars = ${totalBeats} quarter-note beats. The rhythm array must sum to at most this.`,
+    `- Length: ${ctx.bars} bars = ${totalBeats} quarter-note beats. The rhythm array must sum to`,
+    `  at most ${totalBeats} and at least ${Math.max(2, Math.round(totalBeats * 0.8))} — a melody that fills only part of the scene`,
+    '  leaves dead air at the end of every loop.',
     `- Chords: ${ctx.chordSummary}`,
     '- Land on chord tones at phrase starts and ends; passing notes between are fine.',
     '',
@@ -251,7 +253,7 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     '- `syllables` may be a DIFFERENT length — it is spread across the melody, not matched to it.',
     '- Concatenating `syllables` must reproduce `phrase` exactly.',
     '- Degrees are 0-6; octave is -1, 0 or 1.',
-    `- The rhythm array must sum to at most ${totalBeats} beats.`,
+    `- The rhythm array must sum to at most ${totalBeats} beats and at least ${Math.max(2, Math.round(totalBeats * 0.8))}.`,
     `- Call ${SUBMIT_TEXT2VOICE_TOOL_NAME} exactly once. Return nothing else.`,
   );
 
