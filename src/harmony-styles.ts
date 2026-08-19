@@ -193,6 +193,20 @@ export function deriveHarmonyVoices(
 // Delivery — how syllables are dealt out to the voices
 // ---------------------------------------------------------------------------
 
+/** Per-entry render treatment — merged over the lane's style treatment. */
+export interface AssignmentTreatment {
+  pitchMode?: 'lock' | 'natural' | 'contour';
+  contourDepth?: number;
+  timeMode?: 'fill' | 'natural';
+  /** Accent, relative within the lane (lanes peak-normalize). */
+  gain?: number;
+  /** Renders the raw fragment as breath (no analysis, no pitch). */
+  kind?: 'syllable' | 'inhale';
+  reverse?: boolean;
+  /** Overrides the syllable text (an inhale speaks "haaah", not a word). */
+  textOverride?: string;
+}
+
 export interface VoiceSyllableAssignment {
   /** Index into the phrase's syllable array, or null for a rest. */
   syllableIndex: number | null;
@@ -202,6 +216,7 @@ export interface VoiceSyllableAssignment {
    * so the arrays stay index-aligned even where a voice drops out.
    */
   note: PluginMidiNote | null;
+  treatment?: AssignmentTreatment;
 }
 
 /**

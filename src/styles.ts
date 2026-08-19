@@ -24,6 +24,14 @@ export type LaneRole = 'lead' | 'group' | 'adlib' | 'drone';
 export const STYLE_IDS = ['choir', 'chant', 'tagteam', 'trap', 'sprechgesang'] as const;
 export type StyleId = (typeof STYLE_IDS)[number];
 
+/** How this style's voices are pitched and timed by the renderer. */
+export interface VoxTreatment {
+  pitchMode: 'lock' | 'natural' | 'contour';
+  /** contour only: 0 = sung lock, 1 = full speech contour. */
+  contourDepth: number;
+  timeMode: 'fill' | 'natural';
+}
+
 export interface StylePreset {
   id: StyleId;
   label: string;
@@ -36,9 +44,16 @@ export interface StylePreset {
   notesPerBeat: number;
   /** Whether the LAST lane is a hype-man echoing phrase-final words. */
   adlibLane: boolean;
+  /** Pitch/time treatment for every lane (host >= 3.5.0; older hosts lock). */
+  treatment: VoxTreatment;
+  /** Breathy styles get audible inhales at phrase starts. */
+  audibleInhales: boolean;
   /** Extra system-prompt lines composed under this style. */
   promptPack: string[];
 }
+
+/** The default (and pre-style) treatment: fully sung. */
+export const SUNG_TREATMENT: VoxTreatment = { pitchMode: 'lock', contourDepth: 1, timeMode: 'fill' };
 
 export const STYLES: Record<StyleId, StylePreset> = {
   choir: {
@@ -50,6 +65,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     character: 'choir',
     notesPerBeat: 2,
     adlibLane: false,
+    treatment: SUNG_TREATMENT,
+    audibleInhales: false,
     promptPack: [],
   },
   chant: {
@@ -61,6 +78,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     character: 'ghost',
     notesPerBeat: 1,
     adlibLane: false,
+    treatment: { pitchMode: 'lock', contourDepth: 1, timeMode: 'fill' },
+    audibleInhales: true,
     promptPack: [
       '## Style: chant',
       '- Recite: hold ONE pitch through runs of text (long notes), moving only at cadences.',
@@ -76,6 +95,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     character: 'machine',
     notesPerBeat: 2,
     adlibLane: false,
+    treatment: { pitchMode: 'contour', contourDepth: 0.35, timeMode: 'natural' },
+    audibleInhales: false,
     promptPack: [
       '## Style: tag-team rap',
       '- Write PUNCHY lines: short phrases, hard rests between them, end-stopped.',
@@ -94,6 +115,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     character: 'machine',
     notesPerBeat: 3,
     adlibLane: true,
+    treatment: { pitchMode: 'contour', contourDepth: 0.5, timeMode: 'natural' },
+    audibleInhales: false,
     promptPack: [
       '## Style: trap',
       '- Triplet flow: rolling runs of short notes, then SPACE. Leave real gaps after',
@@ -111,6 +134,8 @@ export const STYLES: Record<StyleId, StylePreset> = {
     character: 'ghost',
     notesPerBeat: 2,
     adlibLane: false,
+    treatment: { pitchMode: 'contour', contourDepth: 0.85, timeMode: 'fill' },
+    audibleInhales: true,
     promptPack: [
       '## Style: Sprechgesang',
       '- Expressionist declamation: wide, angular intervals — the leaps ARE the point here,',

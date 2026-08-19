@@ -99,3 +99,60 @@ describe('buildVocalLineRequest', () => {
     expect(slow.syllables[1].startSec).toBeCloseTo(fast.syllables[1].startSec * 2);
   });
 });
+
+describe('treatments flow into the render request', () => {
+  const SY = ['ver', 'sa'];
+  const notes = [note(62, 0), note(64, 1)];
+
+  it('applies the lane treatment to every ordinary syllable', () => {
+    const assignments = assignSyllables([notes], SY.length, 'unison')[0];
+    const req = buildVocalLineRequest(assignments, SY, 'machine', 0, 1, 120, 4, undefined, {
+      pitchMode: 'contour',
+      contourDepth: 0.5,
+      timeMode: 'natural',
+    });
+    req.syllables.forEach((s: VocalSyllableSpec) => {
+      expect(s.pitchMode).toBe('contour');
+      expect(s.contourDepth).toBe(0.5);
+      expect(s.timeMode).toBe('natural');
+      expect(s.kind).toBe('syllable');
+    });
+  });
+
+  it('per-entry treatment overrides the lane treatment', () => {
+    const assignments = assignSyllables([notes], SY.length, 'unison')[0];
+    assignments[1] = { ...assignments[1], treatment: { pitchMode: 'lock', gain: 1.6 } };
+    const req = buildVocalLineRequest(assignments, SY, 'machine', 0, 1, 120, 4, undefined, {
+      pitchMode: 'contour',
+      contourDepth: 0.5,
+      timeMode: 'natural',
+    });
+    expect(req.syllables[0].pitchMode).toBe('contour');
+    expect(req.syllables[1].pitchMode).toBe('lock');
+    expect(req.syllables[1].gain).toBe(1.6);
+    // Unset override fields still inherit the lane's.
+    expect(req.syllables[1].timeMode).toBe('natural');
+  });
+
+  it('inhale entries render with an overridden text and no syllable', () => {
+    const inhale = {
+      syllableIndex: 0,
+      note: note(60, 3.5),
+      treatment: { kind: 'inhale' as const, reverse: true, gain: 0.35, textOverride: 'haaah' },
+    };
+    const req = buildVocalLineRequest([inhale], SY, 'ghost', 0, 1, 120, 4);
+    expect(req.syllables).toHaveLength(1);
+    expect(req.syllables[0].text).toBe('haaah');
+    expect(req.syllables[0].kind).toBe('inhale');
+    expect(req.syllables[0].reverse).toBe(true);
+  });
+
+  it('defaults to fully sung when no lane treatment is given', () => {
+    const assignments = assignSyllables([notes], SY.length, 'unison')[0];
+    const req = buildVocalLineRequest(assignments, SY, 'natural', 0, 1, 120, 4);
+    req.syllables.forEach((s: VocalSyllableSpec) => {
+      expect(s.pitchMode).toBe('lock');
+      expect(s.timeMode).toBe('fill');
+    });
+  });
+});

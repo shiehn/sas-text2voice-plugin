@@ -69,8 +69,39 @@ export function buildAdlibEchoes(
           startBeat: start + i * per,
           durationBeats: per,
         },
+        // An echo is spoken-ish, half-loose around the lead's closing pitch.
+        treatment: { pitchMode: 'contour', contourDepth: 0.5, timeMode: 'natural' },
       });
     });
   }
   return echoes;
+}
+
+
+/** Audible-inhale placement: gaps at least this long get a breath. */
+const MIN_INHALE_GAP_BEATS = 0.75;
+/** The inhale occupies the TAIL of the gap, landing just before the entry. */
+const INHALE_BEATS = 0.3;
+
+/**
+ * A soft audible inhale just before each phrase AFTER a long enough gap —
+ * rendered by speaking "haaah" REVERSED through the raw (no-analysis) path.
+ * Appended to the LEAD lane of breathy styles.
+ */
+export function buildInhales(phrases: PhraseSpan[]): VoiceSyllableAssignment[] {
+  const inhales: VoiceSyllableAssignment[] = [];
+  for (const phrase of phrases) {
+    if (phrase.gapBeats < MIN_INHALE_GAP_BEATS) continue;
+    inhales.push({
+      syllableIndex: 0, // unused: the treatment overrides the text
+      note: {
+        pitch: 60, // unused by the inhale path
+        startBeat: phrase.endBeat + phrase.gapBeats - INHALE_BEATS,
+        durationBeats: INHALE_BEATS,
+        velocity: 40,
+      },
+      treatment: { kind: 'inhale', reverse: true, gain: 0.35, textOverride: 'haaah' },
+    });
+  }
+  return inhales;
 }

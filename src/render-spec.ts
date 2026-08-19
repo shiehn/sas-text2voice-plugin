@@ -15,6 +15,7 @@ import type {
 } from '@signalsandsorcery/plugin-sdk';
 import { characterFor, type Character } from './harmony-styles';
 import type { VoiceSyllableAssignment } from './harmony-styles';
+import { SUNG_TREATMENT, type VoxTreatment } from './styles';
 
 // The wire contract lives in the SDK (@since 3.4.0); these aliases keep the
 // local call sites readable without redeclaring — and therefore risking drift
@@ -40,13 +41,16 @@ export function buildVocalLineRequest(
   bpm: number,
   totalBeats: number,
   ttsVoice?: string,
+  laneTreatment: VoxTreatment = SUNG_TREATMENT,
 ): VocalLineRequest {
   const params = characterFor(character, voiceIndex, voiceCount);
   const specs: VocalSyllableSpec[] = [];
 
   for (const a of assignments) {
-    if (a.syllableIndex === null || a.note === null) continue;
-    const text = syllables[a.syllableIndex];
+    if (a.note === null) continue;
+    const isInhale = a.treatment?.kind === 'inhale';
+    if (a.syllableIndex === null && !isInhale) continue;
+    const text = a.treatment?.textOverride ?? (a.syllableIndex !== null ? syllables[a.syllableIndex] : '');
     if (!text) continue;
     specs.push({
       text,
@@ -56,6 +60,13 @@ export function buildVocalLineRequest(
       formantWarp: params.formantWarp,
       breath: params.breath,
       jitter: params.jitter,
+      // Lane-level treatment first, per-entry override on top.
+      pitchMode: a.treatment?.pitchMode ?? laneTreatment.pitchMode,
+      contourDepth: a.treatment?.contourDepth ?? laneTreatment.contourDepth,
+      timeMode: a.treatment?.timeMode ?? laneTreatment.timeMode,
+      gain: a.treatment?.gain ?? 1,
+      reverse: a.treatment?.reverse ?? false,
+      kind: a.treatment?.kind ?? 'syllable',
     });
   }
 

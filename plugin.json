@@ -5,9 +5,21 @@
   "description": "Paste prose — an article, a paragraph, anything — and it is sung. An LLM picks a phrase from the text that fits the scene, composes 1-6 vocal lines over the scene's key and chords, and each syllable is spoken by a system speech voice and forced onto its note (WORLD analysis/resynthesis: the speaker's mouth is kept, their intonation discarded). Harmony styles from unison and choral to organum and cluster; delivery as unison, canon or hocket; voice characters built from formant warp, breath and pitch jitter. Rendering is offline — every voice lands on its own audio track, so freeze and export behave normally.",
   "generatorType": "audio",
   "main": "index.js",
-  "minHostVersion": "3.4.0",
+  "minHostVersion": "3.5.0",
   "builtIn": true,
-  "supportedTimeSignatures": ["2/4", "3/4", "4/4", "5/4", "6/4", "7/4", "5/8", "6/8", "7/8", "9/8", "12/8"],
+  "supportedTimeSignatures": [
+    "2/4",
+    "3/4",
+    "4/4",
+    "5/4",
+    "6/4",
+    "7/4",
+    "5/8",
+    "6/8",
+    "7/8",
+    "9/8",
+    "12/8"
+  ],
   "capabilities": {
     "requiresLLM": true,
     "requiresSurgeXT": false

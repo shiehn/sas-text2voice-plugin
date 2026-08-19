@@ -67,8 +67,8 @@ import {
   validateSyllableSplit,
 } from './syllables';
 import { applyBreathGuard, breathLimitsForBpm, detectPhrases } from './phrases';
-import { buildAdlibEchoes } from './adlib';
-import { laneMixFor, laneRolesFor, roleLabel, STYLES, type LaneRole } from './styles';
+import { buildAdlibEchoes, buildInhales } from './adlib';
+import { laneMixFor, laneRolesFor, roleLabel, STYLES, SUNG_TREATMENT, type LaneRole } from './styles';
 import { tonicPcFor } from './music-helpers';
 import { asVocalHost, HOST_TOO_OLD_MESSAGE } from './host-vocal';
 import {
@@ -296,6 +296,21 @@ export async function generateText2Voice(
       assignments[i] = buildAdlibEchoes(leadSlots, phrases, wordSpans, syllableCount);
     }
   });
+  // Tag-team shouts hit harder than the lane's verse: an intra-lane accent
+  // (per-lane loudness itself rides track volume — lanes peak-normalize).
+  if (config.delivery === 'tagteam') {
+    roles.forEach((role, i) => {
+      if (role !== 'group') return;
+      assignments[i] = assignments[i].map((a) =>
+        a.syllableIndex === null ? a : { ...a, treatment: { ...a.treatment, gain: 1.6 } },
+      );
+    });
+  }
+  // Breathy styles inhale audibly before phrases with room for it — the
+  // reversed-exhale trick through the renderer's raw path.
+  if (config.style && STYLES[config.style].audibleInhales) {
+    assignments[0] = [...assignments[0], ...buildInhales(phrases)];
+  }
 
   if (spread.dropped > 0) {
     host.showToast(
@@ -348,6 +363,7 @@ export async function generateText2Voice(
         bpm,
         totalBeats,
         config.ttsVoice,
+        config.style ? STYLES[config.style].treatment : SUNG_TREATMENT,
       );
       const mix = laneMixFor(roles[lane.voiceIndex] ?? 'group', lane.voiceIndex);
       // Mix is applied to EVERY lane EVERY run, resets included: reconcile
