@@ -336,6 +336,12 @@ function Text2VoiceGroupRow({
     reword: 'Re-word',
     render: 'Re-render',
   };
+  const NEXT_SUMMARY: Record<GenerationMode, string> = {
+    compose: 'new music + new words',
+    import: 'read the track + fit words',
+    reword: 'keep melody · new words',
+    render: 're-render voices only',
+  };
   const MODE_HINT: Record<GenerationMode, string> = {
     compose: 'Writes new music and new words. The slow path.',
     import: 'Reads the chosen track\'s MIDI as the melody (no composing), then fits words to it.',
@@ -548,15 +554,19 @@ function Text2VoiceGroupRow({
               .catch(() => {});
           }}
           disabled={generateDisabled || !melody}
-          title="Compose different music for this text — discards the current melody"
-          className={`px-1.5 py-0.5 text-[10px] rounded-sm border transition-colors ${
+          title={
+            importedTrackDbId
+              ? 'Re-read the source track now — the melody re-imports and the words refit'
+              : 'Compose different music — discards the current melody (the words refit to the new one)'
+          }
+          className={`px-1.5 py-0.5 text-[10px] rounded-sm border transition-colors whitespace-nowrap ${
             generateDisabled || !melody
               ? 'bg-sas-panel border-sas-border text-sas-muted/40 cursor-not-allowed'
               : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent hover:text-sas-accent'
           }`}
           data-testid="text2voice-new-melody"
         >
-          ♪+
+          ♪ New music
         </button>
 
         <button
@@ -658,6 +668,10 @@ function Text2VoiceGroupRow({
             )}
             <div className="flex items-center justify-between mt-1 gap-2">
               <span className="text-[9px] text-sas-muted truncate">
+                <span className="text-sas-muted/80" data-testid="text2voice-next">
+                  Next: {NEXT_SUMMARY[plannedMode]}
+                </span>
+                {' · '}
                 {words ? (
                   <>
                     sang: <span className="text-sas-text italic">&ldquo;{words.phrase}&rdquo;</span>

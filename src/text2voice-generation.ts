@@ -504,6 +504,17 @@ export async function generateText2Voice(
   }
 
   services.updateTrack(track.handle.id, (t) => ({ ...t, prompt: finalWords.phrase }));
+
+  // Say what ACTUALLY happened — the button predicted it; this confirms it.
+  const roleSummary = roles.map((r, i) => roleLabel(r, i)).join(' · ');
+  const RAN: Record<GenerationMode, string> = {
+    compose: 'Composed new music and new words',
+    import: 'Read the track as the melody and fitted words to it',
+    reword: 'Kept the melody — new words fitted to it',
+    render: 'Re-rendered the voices only (no model call)',
+  };
+  host.showToast('success', RAN[mode], `Lanes: ${roleSummary}`);
+
   await services.reloadTracks(true);
 }
 

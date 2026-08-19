@@ -1,6 +1,23 @@
 # @signalsandsorcery/text2voice-generator
 
-Paste prose. Hear it sung by machines.
+Paste prose — or just a topic — and hear it sung, chanted, or rapped by machines.
+
+**Styles**: Choir · Chant · Tag-Team Rap (the crew shouts each phrase-final
+word) · Trap (triplet flow with an adlib lane echoing into the gaps) ·
+Sprechgesang. A style is a preset over the axes, applied in one write and
+freely overridable ("Custom").
+
+**Sources**: Quote my text (a phrase is quoted verbatim and sung) · Write
+lyrics (original lines about a topic, fitted to the melody's phrases with an
+AABB/ABAB rhyme scheme landing on phrase-final notes) · Sing an existing track
+(any MIDI track in the scene becomes the lead line — monophonized, top note
+wins — at zero model cost).
+
+**Pitch treatments** (host ≥ 3.5.0): locked (sung) · natural (spoken, the
+speech contour kept) · contour (the shape survives, recentered on the note —
+"rap but audibly in key"). Breath is enforced: nobody sings longer than a
+lungful, catch-breath gaps are carved mid-line, and breathy styles inhale
+audibly (a reversed exhale) before phrases.
 
 An LLM quotes a phrase out of the text you supply, sets it over the scene's key
 and chord progression on a syllable grid, and then every syllable is spoken by a
