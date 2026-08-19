@@ -78,8 +78,37 @@ import {
 } from './src/text2voice-generation';
 import { supportsSystemVoices, type SystemVoice } from './src/host-vocal';
 import { supportsMelodyImport } from './src/import-melody';
+
 import { silentShuffleAdapter, silentSoundAdapter } from './src/silent-sound';
 import { configMatchesStyle, isStyleId, STYLE_IDS, STYLES, styleAxes, type StyleId } from './src/styles';
+
+interface VocalModelRow {
+  id: string;
+  label: string;
+  family: string;
+  sizeMB: number;
+  license: string;
+  state: 'not_installed' | 'downloading' | 'installed' | 'error';
+  progressPct?: number;
+  error?: string;
+  voices: Array<{ id: string; label: string }>;
+}
+
+interface VocalModelHost {
+  listVocalModels(): Promise<VocalModelRow[]>;
+  installVocalModel(modelId: string): Promise<void>;
+  uninstallVocalModel(modelId: string): Promise<void>;
+}
+
+function vocalModelHost(host: unknown): VocalModelHost | null {
+  if (!host || typeof host !== 'object') return null;
+  const h = host as Partial<VocalModelHost>;
+  return typeof h.listVocalModels === 'function' &&
+    typeof h.installVocalModel === 'function' &&
+    typeof h.uninstallVocalModel === 'function'
+    ? (h as VocalModelHost)
+    : null;
+}
 
 // Rendering is the slow part: one speech spawn per syllable, then one render
 // per voice. Comfortably longer than the model call that precedes it.
@@ -119,6 +148,9 @@ function Text2VoiceGroupRow({
   const [pace, setPace] = useState<number>(2);
   const [styleId, setStyleId] = useState<StyleId | ''>('');
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>([]);
+  const [showVoiceManager, setShowVoiceManager] = useState(false);
+  const [vocalModels, setVocalModels] = useState<VocalModelRow[]>([]);
+  const [installBusy, setInstallBusy] = useState<string | null>(null);
   const [words, setWords] = useState<Text2VoiceWords | null>(null);
   const [melody, setMelody] = useState<Text2VoiceMelody | null>(null);
   const [sourceMode, setSourceMode] = useState<'quote' | 'write'>('quote');
@@ -216,19 +248,33 @@ function Text2VoiceGroupRow({
   }, [host, scene, isGenerating]);
 
   // System voices are host-enumerated (they differ per OS), never hardcoded.
-  useEffect(() => {
-    let cancelled = false;
-    if (!supportsSystemVoices(host)) return undefined;
+  // Installed model voices arrive in the same roster, prefixed — so the picker
+  // updates the moment an install lands or an uninstall completes.
+  const refreshVoices = useCallback((): void => {
+    if (!supportsSystemVoices(host)) return;
     void (host as unknown as { listSystemVoices(): Promise<SystemVoice[]> })
       .listSystemVoices()
-      .then((voices) => {
-        if (!cancelled) setSystemVoices(voices);
-      })
+      .then(setSystemVoices)
       .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
   }, [host]);
+
+  const refreshModels = useCallback((): void => {
+    const mh = vocalModelHost(host);
+    if (!mh) return;
+    void mh.listVocalModels().then(setVocalModels).catch(() => {});
+  }, [host]);
+
+  useEffect(() => {
+    refreshVoices();
+    refreshModels();
+  }, [refreshVoices, refreshModels]);
+
+  // Live progress while a download is in flight.
+  useEffect(() => {
+    if (!vocalModels.some((m) => m.state === 'downloading')) return undefined;
+    const timer = setInterval(refreshModels, 1500);
+    return () => clearInterval(timer);
+  }, [vocalModels, refreshModels]);
 
   const persist = useCallback(
     (patch: Partial<{
@@ -691,19 +737,65 @@ function Text2VoiceGroupRow({
                     value={ttsVoice}
                     onChange={(e) => {
                       setTtsVoice(e.target.value);
-                      persist({ ttsVoice: e.target.value });
+                      void persist({ ttsVoice: e.target.value });
                     }}
-                    title="System speech voice. Changing this re-renders without composing again."
+                    title="Voice. System voices are the default; downloaded model voices join this list when installed. Changing re-renders without composing again."
                     className={SELECT_CLASS}
                     data-testid="text2voice-tts-voice"
                   >
                     <option value="">Default voice</option>
-                    {systemVoices.map((v) => (
-                      <option key={v.name} value={v.name}>
-                        {v.name}
-                      </option>
-                    ))}
+                    <optgroup label="System">
+                      {systemVoices
+                        .filter((v) => !v.name.includes(':'))
+                        .map((v) => (
+                          <option key={v.name} value={v.name}>
+                            {v.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                    {systemVoices.some((v) => v.name.startsWith('piper:')) && (
+                      <optgroup label="Piper (downloaded)">
+                        {systemVoices
+                          .filter((v) => v.name.startsWith('piper:'))
+                          .map((v) => (
+                            <option key={v.name} value={v.name}>
+                              {v.name.slice('piper:'.length)}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {systemVoices.some((v) => v.name.startsWith('kokoro:')) && (
+                      <optgroup label="Kokoro (downloaded)">
+                        {systemVoices
+                          .filter((v) => v.name.startsWith('kokoro:'))
+                          .map((v) => (
+                            <option key={v.name} value={v.name}>
+                              {v.name.slice('kokoro:'.length)}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {ttsVoice && !systemVoices.some((v) => v.name === ttsVoice) && (
+                      <option value={ttsVoice}>{ttsVoice} (not installed — uses default)</option>
+                    )}
                   </select>
+                )}
+                {vocalModelHost(host) && (
+                  <button
+                    onClick={() => {
+                      setShowVoiceManager((v) => !v);
+                      refreshModels();
+                    }}
+                    title="Download or remove third-party voice models (Piper, Kokoro). Nothing is bundled — models come from their official releases."
+                    className={`px-1.5 py-0.5 text-[10px] rounded-sm border transition-colors ${
+                      showVoiceManager
+                        ? 'bg-sas-accent/20 border-sas-accent text-sas-accent'
+                        : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent'
+                    }`}
+                    data-testid="text2voice-voice-manager-toggle"
+                  >
+                    Voices…
+                  </button>
                 )}
                 {sourceMode === 'quote' && (
                   <span className="text-[9px] text-sas-muted tabular-nums">
@@ -713,6 +805,76 @@ function Text2VoiceGroupRow({
               </div>
             </div>
           </div>
+
+          {showVoiceManager && (
+            <div className="px-2 pb-1 space-y-1" data-testid="text2voice-voice-manager">
+              {vocalModels.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex items-center gap-2 px-2 py-1 rounded-sm border border-sas-border bg-sas-panel"
+                >
+                  <span className="text-[10px] text-sas-text whitespace-nowrap">{m.label}</span>
+                  <span className="text-[9px] text-sas-muted">{m.sizeMB} MB</span>
+                  <span className="text-[9px] text-sas-muted truncate flex-1" title={m.license}>
+                    {m.license}
+                  </span>
+                  {m.state === 'downloading' ? (
+                    <span className="text-[10px] text-sas-accent tabular-nums">
+                      {m.progressPct ?? 0}%
+                    </span>
+                  ) : m.state === 'installed' ? (
+                    <button
+                      onClick={() => {
+                        const mh = vocalModelHost(host);
+                        if (!mh) return;
+                        void mh
+                          .uninstallVocalModel(m.id)
+                          .then(() => {
+                            refreshModels();
+                            refreshVoices();
+                          })
+                          .catch(() => refreshModels());
+                      }}
+                      className="px-1.5 py-0.5 text-[10px] rounded-sm border border-sas-border text-sas-muted hover:border-red-500/60 hover:text-red-400 transition-colors"
+                      data-testid={`text2voice-uninstall-${m.id}`}
+                    >
+                      Uninstall
+                    </button>
+                  ) : (
+                    <button
+                      disabled={installBusy !== null}
+                      onClick={() => {
+                        const mh = vocalModelHost(host);
+                        if (!mh) return;
+                        setInstallBusy(m.id);
+                        refreshModels();
+                        void mh
+                          .installVocalModel(m.id)
+                          .then(() => {
+                            host.showToast('success', `${m.label} installed`, 'Its voices are now in the voice list.');
+                          })
+                          .catch((err: unknown) => {
+                            host.showToast('error', `${m.label} install failed`, err instanceof Error ? err.message : String(err));
+                          })
+                          .finally(() => {
+                            setInstallBusy(null);
+                            refreshModels();
+                            refreshVoices();
+                          });
+                      }}
+                      className="px-1.5 py-0.5 text-[10px] rounded-sm border border-sas-border text-sas-muted hover:border-sas-accent hover:text-sas-accent transition-colors disabled:opacity-40"
+                      data-testid={`text2voice-install-${m.id}`}
+                    >
+                      {m.state === 'error' ? 'Retry' : 'Install'}
+                    </button>
+                  )}
+                </div>
+              ))}
+              {vocalModels.length === 0 && (
+                <div className="text-[9px] text-sas-muted px-2">No downloadable voices on this host.</div>
+              )}
+            </div>
+          )}
 
           {/* --- voice rows ---------------------------------------------- */}
           <div className="p-1 space-y-1">
