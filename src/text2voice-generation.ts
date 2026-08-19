@@ -65,6 +65,7 @@ import {
   validatePhraseInSource,
   validateSyllableSplit,
 } from './syllables';
+import { applyBreathGuard, breathLimitsForBpm, detectPhrases } from './phrases';
 import { tonicPcFor } from './music-helpers';
 import { asVocalHost, HOST_TOO_OLD_MESSAGE } from './host-vocal';
 import {
@@ -224,7 +225,23 @@ export async function generateText2Voice(
     syllables.length,
     config.notesPerBeat,
   );
-  const leadSlots = spread.notes;
+
+  // Breath guard: nobody sings longer than a lungful. Carves catch-breath
+  // gaps INSIDE over-long runs (durations only — the slots↔syllables mapping
+  // is untouched). Carved boundaries are 'breath', invisible to phrase-final
+  // machinery like shouts, echoes and rhymes.
+  const { maxBreathBeats, breathBeats } = breathLimitsForBpm(bpm);
+  const guard = applyBreathGuard(spread.notes, maxBreathBeats, breathBeats);
+  const leadSlots = guard.slots;
+  const phrases = detectPhrases(leadSlots, totalBeats, guard.breathAfterSlot);
+  void phrases; // consumed by tag-team / adlib / rhyme in the style phases
+  if (guard.carved > 0) {
+    host.showToast(
+      'info',
+      `${guard.carved} breath${guard.carved === 1 ? '' : 's'} carved`,
+      'A phrase ran longer than a singer could hold — short catch-breath gaps were opened mid-line.',
+    );
+  }
 
   // Harmony voices are RENDER-TIME for derived styles: the cache holds only
   // the composed lead, and the fan-out (unison / organum / drone) is recomputed

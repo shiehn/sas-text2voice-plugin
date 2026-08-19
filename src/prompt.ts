@@ -158,6 +158,8 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     '## Writing for a voice',
     '- BREATHE. Put rests where the sense of the phrase breaks — at commas, clauses, and',
     '  between ideas. A line with no rests is unsingable and exhausting to hear.',
+    `- HARD RULE: never more than ${Math.max(2, Math.round((3.5 * ctx.bpm) / 60))} consecutive beats of notes without a rest —`,
+    '  that is one lungful. A gap will be carved mid-phrase if you exceed it, wherever it falls.',
     '- Phrase in arcs: 2-4 bars that rise and settle, then a breath. Not one long ribbon.',
     '- Move mostly by STEP. Leaps are expressive precisely because they are rare; after a',
     '  leap, step back in the opposite direction.',

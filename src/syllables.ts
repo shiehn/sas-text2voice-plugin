@@ -104,3 +104,43 @@ export function syllableBudget(
 ): number {
   return Math.max(1, Math.floor(bars * quarterNotesPerBar * notesPerBeat));
 }
+
+// --- word spans --------------------------------------------------------------
+
+export interface WordSpan {
+  word: string;
+  /** [startSyl, endSyl) into the syllable array. */
+  startSyl: number;
+  endSyl: number;
+}
+
+/**
+ * Recover word boundaries from a validated syllable split: walk the phrase's
+ * words, greedily consuming syllables until each word's letters are covered.
+ * Provable because `validateSyllableSplit` already guaranteed the syllables
+ * reassemble into the phrase.
+ *
+ * Consumers thinking in SLOTS must map slot → syllable (`slot % count`, the
+ * text loops) BEFORE looking up the span.
+ */
+export function syllableWordSpans(phrase: string, syllables: string[]): WordSpan[] {
+  const spans: WordSpan[] = [];
+  const words = phrase.split(/\s+/).filter((w) => normalizeWord(w).length > 0);
+  let syl = 0;
+  for (const raw of words) {
+    const target = normalizeWord(raw);
+    const start = syl;
+    let acc = '';
+    while (syl < syllables.length && acc.length < target.length) {
+      acc += normalizeWord(syllables[syl]);
+      syl += 1;
+    }
+    if (acc !== target) {
+      // The split disagrees with the words (should be impossible post-
+      // validation) — return what resolved cleanly rather than guessing on.
+      break;
+    }
+    spans.push({ word: raw, startSyl: start, endSyl: syl });
+  }
+  return spans;
+}
