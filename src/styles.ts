@@ -21,8 +21,59 @@ import type { Character, DeliveryMode, HarmonyStyle } from './harmony-styles';
 
 export type LaneRole = 'lead' | 'group' | 'adlib' | 'drone';
 
-export const STYLE_IDS = ['choir', 'chant', 'tagteam', 'trap', 'sprechgesang'] as const;
+export const STYLE_IDS = ['choir', 'ballad', 'chant', 'tagteam', 'trap', 'sprechgesang'] as const;
 export type StyleId = (typeof STYLE_IDS)[number];
+
+/**
+ * How a style's voices BEHAVE within their notes — the expression engine
+ * (vox spec v3). Every value here is the style's amount AT FULL REALISM; the
+ * user's realism dial (0..1) scales the whole pack, and 0 renders the exact
+ * pre-expression output. Applied per assignment in `buildVocalLineRequest`
+ * (phrase entries scoop, sustained notes get vibrato, phrase finals fall and
+ * aspirate, adjacent notes glide), so the pack describes capability, not
+ * placement.
+ */
+export interface ExpressionPack {
+  /** Pitch approach time-constant (ms). Tiny = autotune; ~80 = a singer. */
+  retuneMs: number;
+  /** Phrase-entry approach from below, in cents. */
+  scoopCents: number;
+  /** null = no vibrato for this style. */
+  vibrato: { rateHz: number; depthCents: number; onsetMs: number; ampDepth: number } | null;
+  /** Slow intonation wander, cents. */
+  driftCents: number;
+  /** Lane decorrelation at full realism (different seed per lane). */
+  humanizePitchCents: number;
+  humanizeTimingMs: number;
+  /** Phrase-final breathiness target (aspirated releases). */
+  breathTail: number;
+  /** 'nucleus' puts vowels on the grid — on for everything sung. */
+  align: 'start' | 'nucleus';
+  /** Trained-singer resonance amount at full realism (0..1). */
+  singersFormant: number;
+  /** Spectral brightness tilt at full realism (-1..1). */
+  tilt: number;
+  /** Override the treatment's timeMode ('vowel' = smarter deep compression). */
+  timeMode?: 'fill' | 'natural' | 'vowel';
+}
+
+/** The realism dial's default — expressive, with the surreal one drag away. */
+export const DEFAULT_REALISM = 0.6;
+
+/** Styleless configs still deserve a voice that behaves like one. */
+export const DEFAULT_EXPRESSION: ExpressionPack = {
+  retuneMs: 50,
+  scoopCents: 30,
+  vibrato: { rateHz: 5.2, depthCents: 30, onsetMs: 400, ampDepth: 0.1 },
+  driftCents: 6,
+  humanizePitchCents: 8,
+  humanizeTimingMs: 8,
+  breathTail: 0.15,
+  singersFormant: 0.25,
+  tilt: 0.0,
+  align: 'nucleus',
+  timeMode: 'vowel',
+};
 
 /** How this style's voices are pitched and timed by the renderer. */
 export interface VoxTreatment {
@@ -76,6 +127,8 @@ export interface StylePreset {
   audibleInhales: boolean;
   /** Extra system-prompt lines composed under this style. */
   promptPack: string[];
+  /** In-note behavior (scoops, vibrato, glides) — see ExpressionPack. */
+  expression: ExpressionPack;
 }
 
 /** The default (and pre-style) treatment: fully sung. */
@@ -96,6 +149,52 @@ export const STYLES: Record<StyleId, StylePreset> = {
     rhythmRange: DEFAULT_RHYTHM_RANGE,
     audibleInhales: false,
     promptPack: [],
+    expression: {
+      retuneMs: 90,
+      scoopCents: 40,
+      vibrato: { rateHz: 4.8, depthCents: 35, onsetMs: 500, ampDepth: 0.1 },
+      driftCents: 8,
+      humanizePitchCents: 14,
+      humanizeTimingMs: 18,
+      breathTail: 0.25,
+      singersFormant: 0.3,
+      tilt: 0.0,
+      align: 'nucleus',
+      timeMode: 'vowel',
+    },
+  },
+  ballad: {
+    id: 'ballad',
+    label: 'Ballad',
+    hint: 'one voice, long arcs, real vibrato',
+    harmony: 'unison',
+    delivery: 'unison',
+    character: 'natural',
+    notesPerBeat: 1,
+    adlibLane: false,
+    treatment: SUNG_TREATMENT,
+    register: { top: 64, spanSemitones: 12 },
+    rhythmRange: { minBeats: 1, maxBeats: 6 },
+    audibleInhales: true,
+    promptPack: [
+      '## Style: ballad',
+      '- Long lyrical phrases with room to breathe between them; sustained finals.',
+      '- Melodic arcs that rise toward the middle of a phrase and settle at its end.',
+      '- Mostly stepwise, with ONE expressive leap per phrase at the emotional word.',
+    ],
+    expression: {
+      retuneMs: 80,
+      scoopCents: 120,
+      vibrato: { rateHz: 5.0, depthCents: 70, onsetMs: 450, ampDepth: 0.18 },
+      driftCents: 10,
+      humanizePitchCents: 10,
+      humanizeTimingMs: 12,
+      breathTail: 0.4,
+      singersFormant: 0.5,
+      tilt: 0.05,
+      align: 'nucleus',
+      timeMode: 'vowel',
+    },
   },
   chant: {
     id: 'chant',
@@ -115,6 +214,19 @@ export const STYLES: Record<StyleId, StylePreset> = {
       '- Recite: hold ONE pitch through runs of text (long notes), moving only at cadences.',
       '- Keep the contour narrow — a third either way — and settle downward at every rest.',
     ],
+    expression: {
+      retuneMs: 120,
+      scoopCents: 0,
+      vibrato: null,
+      driftCents: 12,
+      humanizePitchCents: 10,
+      humanizeTimingMs: 12,
+      breathTail: 0.35,
+      singersFormant: 0.15,
+      tilt: -0.1,
+      align: 'nucleus',
+      timeMode: 'vowel',
+    },
   },
   tagteam: {
     id: 'tagteam',
@@ -137,6 +249,18 @@ export const STYLES: Record<StyleId, StylePreset> = {
       '- Favor end-rhyme between successive phrases when the text offers it.',
       '- Rhythm over melody: mostly one pitch per phrase with small drops at the ends.',
     ],
+    expression: {
+      retuneMs: 0,
+      scoopCents: 0,
+      vibrato: null,
+      driftCents: 6,
+      humanizePitchCents: 8,
+      humanizeTimingMs: 14,
+      breathTail: 0,
+      singersFormant: 0.0,
+      tilt: 0.1,
+      align: 'nucleus',
+    },
   },
   trap: {
     id: 'trap',
@@ -158,6 +282,19 @@ export const STYLES: Record<StyleId, StylePreset> = {
       '- Sparse pitch movement: two or three pitches, mostly repeated notes.',
       '- End phrases on a word worth echoing.',
     ],
+    expression: {
+      // The T-Pain dial: a tiny-but-audible retune IS the autotune sound.
+      retuneMs: 6,
+      scoopCents: 0,
+      vibrato: null,
+      driftCents: 0,
+      humanizePitchCents: 4,
+      humanizeTimingMs: 6,
+      breathTail: 0,
+      singersFormant: 0.0,
+      tilt: 0.15,
+      align: 'nucleus',
+    },
   },
   sprechgesang: {
     id: 'sprechgesang',
@@ -178,6 +315,19 @@ export const STYLES: Record<StyleId, StylePreset> = {
       '  inverting the usual stepwise rule.',
       '- Strict, deliberate rhythm; irregular phrase lengths; unsettling rests.',
     ],
+    expression: {
+      retuneMs: 40,
+      scoopCents: 60,
+      vibrato: { rateHz: 5.5, depthCents: 25, onsetMs: 400, ampDepth: 0.08 },
+      driftCents: 20,
+      humanizePitchCents: 16,
+      humanizeTimingMs: 20,
+      breathTail: 0.3,
+      singersFormant: 0.2,
+      tilt: 0.0,
+      align: 'nucleus',
+      timeMode: 'vowel',
+    },
   },
 };
 
@@ -216,6 +366,11 @@ export function configMatchesStyle(
     s.character === axes.character &&
     s.notesPerBeat === axes.notesPerBeat
   );
+}
+
+/** The expression pack for a style — DEFAULT_EXPRESSION when no style is set. */
+export function expressionFor(styleId: StyleId | null): ExpressionPack {
+  return styleId ? STYLES[styleId].expression : DEFAULT_EXPRESSION;
 }
 
 /**

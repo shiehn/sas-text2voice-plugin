@@ -119,6 +119,12 @@ export interface Text2VoiceConfig {
   topic?: string;
   /** Write mode only — rhyme targets are phrase-final syllables. */
   rhymeScheme?: 'none' | 'AABB' | 'ABAB';
+  /**
+   * The realism dial, 0..1: scales the active style's ExpressionPack (scoops,
+   * vibrato, glides, lane decorrelation). 0 renders the exact pre-expression
+   * machine voice; render-only — never invalidates melody or words.
+   */
+  realism?: number;
   /** Where the melody comes from: composed by the model, or read from a track. */
   melodySource?: 'composed' | 'imported';
   /** The scene track (tracks.id) the melody is read from, when imported. */
@@ -145,6 +151,9 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
   if (typeof c.topic === 'string') config.topic = c.topic.slice(0, 500);
   config.rhymeScheme =
     c.rhymeScheme === 'AABB' || c.rhymeScheme === 'ABAB' ? c.rhymeScheme : 'none';
+  if (typeof c.realism === 'number' && Number.isFinite(c.realism)) {
+    config.realism = Math.max(0, Math.min(1, c.realism));
+  }
   config.melodySource = c.melodySource === 'imported' ? 'imported' : 'composed';
   if (typeof c.importedTrackDbId === 'string') config.importedTrackDbId = c.importedTrackDbId;
   // A composed harmony cannot be jointly written FOR an imported lead — coerce
@@ -197,6 +206,12 @@ export interface Text2VoiceWords {
   phrase: string;
   /** Its syllable split, in order. */
   syllables: string[];
+  /**
+   * Lexical stress per syllable (1 = stressed), when the model marked it.
+   * Advisory: shapes per-syllable accent gain at render; quote/compose only —
+   * write-mode lines would need mapping through materialization.
+   */
+  stress?: number[];
   /**
    * PROVENANCE — what these words were made with. Without it the planner
    * cannot see that the source mode, topic or rhyme scheme changed, and would

@@ -45,6 +45,7 @@ import {
   gridVoiceToNotes,
   normalizeToRegister,
   parseText2VoiceArgs,
+  foldMelismaRuns,
 } from './compose';
 import { alignVoiceToSlots, distributeSyllables, melodyCapacity } from './distribute';
 import {
@@ -75,7 +76,9 @@ import { materializeLines, phraseBudgets } from './lyrics';
 import { buildAdlibEchoes, buildInhales } from './adlib';
 import {
   DEFAULT_REGISTER,
+  DEFAULT_REALISM,
   DEFAULT_RHYTHM_RANGE,
+  expressionFor,
   laneMixFor,
   laneRolesFor,
   roleLabel,
@@ -294,8 +297,11 @@ export async function generateText2Voice(
   // the syllable timeline; every other voice supplies pitch at those moments,
   // so unison and choral stay locked together.
   const syllables = finalWords.syllables;
+  // Melisma runs fold FIRST: a marked continuation note merges into its head
+  // as extra pitch targets, and the folded note is one indivisible slot.
+  const leadLine = foldMelismaRuns(registeredVoices[0]);
   const spread = distributeSyllables(
-    registeredVoices[0],
+    leadLine,
     syllables.length,
     config.notesPerBeat,
   );
@@ -323,7 +329,7 @@ export async function generateText2Voice(
   const harmonyVoices: PluginMidiNote[][] = composed
     ? registeredVoices.slice(1)
     : deriveHarmonyVoices(
-        registeredVoices[0],
+        leadLine,
         config.harmony,
         config.voiceCount,
         tonicPcFor(musical.key) ?? 0,
@@ -445,6 +451,15 @@ export async function generateText2Voice(
         totalBeats,
         config.ttsVoice,
         config.style ? STYLES[config.style].treatment : SUNG_TREATMENT,
+        {
+          expression: expressionFor(config.style ?? null),
+          realism: config.realism ?? DEFAULT_REALISM,
+          // Distinct prime-spaced seeds per lane: unison clones decorrelate
+          // into a section; the same lane re-renders bit-identically.
+          laneSeed: lane.voiceIndex * 7919 + 1,
+          wordSpans,
+          stress: finalWords.stress ?? null,
+        },
       );
       const mix = laneMixFor(roles[lane.voiceIndex] ?? 'group', lane.voiceIndex);
       // Mix is applied to EVERY lane EVERY run, resets included: reconcile
@@ -633,7 +648,12 @@ async function rewordOntoMelody(
   // A length mismatch is NOT fatal — a short phrase loops onto the melody, a
   // long one is trimmed and reported — so it is left to the distribution layer
   // rather than failing the whole run.
-  return { phrase, syllables, source: 'quote' };
+  let stress: number[] | undefined;
+  if (Array.isArray(a.stress) && a.stress.length === syllables.length) {
+    const cleaned = a.stress.map((v: unknown) => (v === 1 || v === true ? 1 : 0));
+    if (cleaned.some((v: number) => v === 1)) stress = cleaned;
+  }
+  return { phrase, syllables, source: 'quote', ...(stress ? { stress } : {}) };
 }
 
 /**
@@ -875,6 +895,7 @@ async function composeFromText(
     words: {
       phrase: parsed.phrase,
       syllables: parsed.syllables,
+      ...(parsed.stress ? { stress: parsed.stress } : {}),
       source: config.sourceMode === 'write' ? 'write' : 'quote',
       ...(config.sourceMode === 'write'
         ? { topic: (config.topic ?? '').trim(), rhymeScheme: config.rhymeScheme ?? 'none' }

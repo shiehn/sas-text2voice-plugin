@@ -55,6 +55,15 @@ export interface DistributionResult {
  * then nudged toward the phrase length, keeping the per-slot rate as uniform
  * as possible while it does.
  */
+/**
+ * A melisma run (one syllable, several pitches — see foldMelismaRuns) is one
+ * INDIVISIBLE slot: subdividing it would deal fresh syllables onto pitches
+ * that exist to extend a single vowel.
+ */
+function isMelismaNote(n: PluginMidiNote): boolean {
+  return Array.isArray((n as { pitches?: unknown }).pitches);
+}
+
 export function distributeSyllables(
   notes: PluginMidiNote[],
   syllableCount: number,
@@ -73,14 +82,16 @@ export function distributeSyllables(
   // Natural capacity at the requested rate: a 1-beat note takes `rate`
   // syllables, a 2-beat note twice that. Never fewer than one — every note in
   // the melody gets sung — and never so many that a slot dips under the
-  // audibility floor.
+  // audibility floor. Melisma runs are pinned to exactly one.
   const maxByFloor = (n: PluginMidiNote): number =>
     Math.max(1, Math.floor(n.durationBeats / MIN_SLOT_BEATS));
   const slots = sorted.map((n) =>
-    Math.max(
-      1,
-      Math.min(MAX_SLOTS_PER_NOTE, maxByFloor(n), Math.round(n.durationBeats * rate)),
-    ),
+    isMelismaNote(n)
+      ? 1
+      : Math.max(
+          1,
+          Math.min(MAX_SLOTS_PER_NOTE, maxByFloor(n), Math.round(n.durationBeats * rate)),
+        ),
   );
   let total = slots.reduce((a, b) => a + b, 0);
 
@@ -111,6 +122,7 @@ export function distributeSyllables(
     let roomiest = -1;
     for (let i = 0; i < slots.length; i++) {
       if (slots[i] >= MAX_SLOTS_PER_NOTE) continue;
+      if (isMelismaNote(sorted[i])) continue;
       const next = sorted[i].durationBeats / (slots[i] + 1);
       if (next < MIN_SLOT_BEATS) continue;
       const room = sorted[i].durationBeats / slots[i];
@@ -157,14 +169,16 @@ export function melodyCapacity(notes: PluginMidiNote[], subdivisionsPerBeat: num
   return notes.reduce(
     (sum, n) =>
       sum +
-      Math.max(
-        1,
-        Math.min(
-          MAX_SLOTS_PER_NOTE,
-          Math.max(1, Math.floor(n.durationBeats / MIN_SLOT_BEATS)),
-          Math.round(n.durationBeats * rate),
-        ),
-      ),
+      (isMelismaNote(n)
+        ? 1
+        : Math.max(
+            1,
+            Math.min(
+              MAX_SLOTS_PER_NOTE,
+              Math.max(1, Math.floor(n.durationBeats / MIN_SLOT_BEATS)),
+              Math.round(n.durationBeats * rate),
+            ),
+          )),
     0,
   );
 }

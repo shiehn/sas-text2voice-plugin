@@ -20,6 +20,8 @@ export interface GridSlot {
   degree: number;
   octave: number;
   rest: boolean;
+  /** Extends the PREVIOUS syllable's vowel through this note (a run). */
+  melisma?: boolean;
 }
 
 export interface GridVoice {
@@ -32,6 +34,45 @@ export interface ParsedComposition {
   syllables: string[];
   rhythm: number[];
   voices: GridVoice[];
+  /** Lexical stress per syllable (1 = stressed), when the model marked it. */
+  stress?: number[];
+}
+
+/**
+ * A melody note as this plugin enriches it: `melisma` marks a continuation
+ * note straight from the model; `pitches` is the FOLDED form — one note, one
+ * syllable, several pitch targets — produced by foldMelismaRuns and consumed
+ * by the renderer as a vocal run.
+ */
+export interface MelodyNote extends PluginMidiNote {
+  melisma?: boolean;
+  pitches?: Array<{ midi: number; beats: number }>;
+}
+
+/**
+ * Collapse melisma-marked continuation notes into their head note. The head
+ * keeps its start, absorbs the run's total duration, and carries the pitch
+ * sequence; downstream, distribution pins the folded note to exactly ONE
+ * syllable slot. Non-contiguous marks (after a rest, or first in the line)
+ * are ignored rather than guessed at.
+ */
+export function foldMelismaRuns(notes: PluginMidiNote[]): PluginMidiNote[] {
+  const out: MelodyNote[] = [];
+  for (const raw of [...notes].sort((a, b) => a.startBeat - b.startBeat) as MelodyNote[]) {
+    const prev = out[out.length - 1];
+    const contiguous =
+      prev !== undefined &&
+      Math.abs(prev.startBeat + prev.durationBeats - raw.startBeat) < 1e-6;
+    if (raw.melisma && contiguous) {
+      if (!prev.pitches) prev.pitches = [{ midi: prev.pitch, beats: prev.durationBeats }];
+      prev.pitches.push({ midi: raw.pitch, beats: raw.durationBeats });
+      prev.durationBeats += raw.durationBeats;
+    } else {
+      const { melisma: _drop, ...kept } = raw;
+      out.push({ ...kept });
+    }
+  }
+  return out;
 }
 
 export class CompositionError extends Error {}
@@ -84,13 +125,26 @@ export function parseText2VoiceArgs(args: unknown): ParsedComposition {
       const n = rn as Record<string, unknown>;
       const degree = Math.max(0, Math.min(6, Math.round(asFiniteNumber(n.degree, 0))));
       const octave = Math.max(-1, Math.min(1, Math.round(asFiniteNumber(n.octave, 0))));
-      notes.push({ degree, octave, rest: n.rest === true });
+      notes.push({
+        degree,
+        octave,
+        rest: n.rest === true,
+        ...(n.melisma === true && n.rest !== true && i > 0 ? { melisma: true } : {}),
+      });
     }
     voices.push({ label: typeof v.label === 'string' ? v.label : '', notes });
   }
   if (voices.length === 0) throw new CompositionError('no voices returned');
 
-  return { phrase, syllables, rhythm, voices };
+  // Stress marks are advisory: accept only a clean 0/1 array of the right
+  // length, otherwise drop them — never fail a good setting over bad marks.
+  let stress: number[] | undefined;
+  if (Array.isArray(a.stress) && a.stress.length === syllables.length) {
+    const cleaned = a.stress.map((v) => (v === 1 || v === true ? 1 : 0));
+    if (cleaned.some((v) => v === 1)) stress = cleaned;
+  }
+
+  return { phrase, syllables, rhythm, voices, ...(stress ? { stress } : {}) };
 }
 
 /**
@@ -178,13 +232,17 @@ export function gridVoiceToNotes(
     const slot = voice.notes[i];
     if (!slot.rest) {
       const pitch = clampToRange(anchor + steps[slot.degree] + 12 * slot.octave);
-      notes.push({
+      const note: MelodyNote = {
         pitch,
         startBeat: cursor,
         // Never let a note run past the end of the scene.
         durationBeats: Math.max(0.05, Math.min(dur, maxBeats - cursor)),
         velocity: 88,
-      });
+      };
+      // The melisma mark rides the note into the cache; folding happens at
+      // render time so cached melodies keep working across plugin updates.
+      if (slot.melisma) note.melisma = true;
+      notes.push(note);
     }
     cursor += dur;
   }

@@ -112,6 +112,36 @@ sizes.
 
 `natural` · `choir` · `ghost` · `machine` · `menagerie`
 
+## The expression engine (Realism dial)
+
+Every style carries an *expression pack* — what a throat does that a
+synthesizer doesn't — and the **Realism dial** (next to the style picker)
+scales the whole pack from 0 (the pure machine lock, exactly the original
+renderer) to 1 (full expression):
+
+- **Scoops** into phrase entries, **legato glides** between adjacent notes,
+  and a **retune time-constant** that runs the whole spectrum from natural
+  singer to hard autotune (trap's pack sits at the T-Pain end on purpose).
+- **Vibrato** that onsets late into sustained notes, with a loudness wobble
+  coupled to the pitch wobble; slow seeded **intonation drift**.
+- **Phrase endings fall and aspirate**; long entries swell.
+- **Vowels land on the beat** (consonants lean in early) and long notes
+  stretch the vowel, never the consonants.
+- **Whole-word synthesis**: consecutive syllables of one word are spoken as
+  one utterance and sliced at f0 gaps, so words stop sounding spelled out.
+- **A singer's formant** (~2.9 kHz resonance) and brightness tilt, per style.
+- **Humanize**: every lane gets its own seed — pitch, timing and vibrato
+  phase decorrelate, which is the difference between one voice cloned N
+  times and a choir. Identical seeds render bit-identically.
+- **Melisma**: the composer may extend an important vowel through a short
+  run of notes (marked per note, folded into one indivisible syllable slot).
+- **Stress**: the model marks lexical stress; stressed syllables lean in,
+  unstressed back off.
+
+Changing the dial re-renders voices without recomposing. All of it rides
+`sas-audio-tool vox` spec v3; on an older host the fields are simply absent
+and the voices render as before.
+
 ## The melody survives
 
 Composing the music is by far the slowest step, so the **melody and the words

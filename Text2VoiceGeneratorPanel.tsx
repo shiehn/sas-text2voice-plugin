@@ -80,7 +80,7 @@ import { supportsSystemVoices, type SystemVoice } from './src/host-vocal';
 import { supportsMelodyImport } from './src/import-melody';
 
 import { silentShuffleAdapter, silentSoundAdapter } from './src/silent-sound';
-import { configMatchesStyle, isStyleId, STYLE_IDS, STYLES, styleAxes, type StyleId } from './src/styles';
+import { configMatchesStyle, DEFAULT_REALISM, isStyleId, STYLE_IDS, STYLES, styleAxes, type StyleId } from './src/styles';
 
 interface VocalModelRow {
   id: string;
@@ -146,6 +146,7 @@ function Text2VoiceGroupRow({
   // 4 = sixteenths. Now that a note carries MANY syllables, this is the
   // "how fast do the words go" control.
   const [pace, setPace] = useState<number>(2);
+  const [realism, setRealism] = useState<number>(DEFAULT_REALISM);
   const [styleId, setStyleId] = useState<StyleId | ''>('');
   const [systemVoices, setSystemVoices] = useState<SystemVoice[]>([]);
   const [showVoiceManager, setShowVoiceManager] = useState(false);
@@ -192,6 +193,7 @@ function Text2VoiceGroupRow({
         setVoiceCount(cfg.voiceCount);
         setTtsVoice(cfg.ttsVoice ?? '');
         setPace(cfg.notesPerBeat);
+        setRealism(cfg.realism ?? DEFAULT_REALISM);
         setStyleId(cfg.style ?? '');
         setSourceMode(cfg.sourceMode ?? 'quote');
         setTopic(cfg.topic ?? '');
@@ -285,6 +287,7 @@ function Text2VoiceGroupRow({
       voiceCount: number;
       ttsVoice: string;
       notesPerBeat: number;
+      realism: number;
       style: StyleId | undefined;
       sourceMode: 'quote' | 'write';
       topic: string;
@@ -301,6 +304,7 @@ function Text2VoiceGroupRow({
         voiceCount,
         ttsVoice,
         notesPerBeat: pace,
+        realism,
         style: styleId || undefined,
         sourceMode,
         topic,
@@ -312,7 +316,7 @@ function Text2VoiceGroupRow({
       if (patch.text !== undefined) textDirty.current = false;
       return host.setSceneData(scene, configKey, next).catch(() => {});
     },
-    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, styleId, sourceMode, topic, rhymeScheme, importedTrackDbId],
+    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, realism, styleId, sourceMode, topic, rhymeScheme, importedTrackDbId],
   );
 
   // The first Generate used to race the textarea's blur-persist: the run read
@@ -453,6 +457,20 @@ function Text2VoiceGroupRow({
             </option>
           ))}
         </select>
+
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={realism}
+          onChange={(e) => setRealism(Number(e.target.value))}
+          onMouseUp={() => void persist({ realism })}
+          onTouchEnd={() => void persist({ realism })}
+          title={`Realism ${Math.round(realism * 100)}% — scoops, vibrato, glides, ensemble looseness. 0 is the pure machine; changing it re-renders voices without recomposing.`}
+          className="w-16 accent-sas-accent"
+          data-testid="text2voice-realism"
+        />
 
         {supportsMelodyImport(host) && (
           <select

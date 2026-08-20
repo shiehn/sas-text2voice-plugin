@@ -99,6 +99,14 @@ export function buildSubmitText2VoiceTool(
             'COUNT is independent of the number of melody notes.',
           items: { type: 'string' },
         },
+        stress: {
+          type: 'array',
+          description:
+            'Lexical stress per syllable, parallel to `syllables`: 1 for a stressed ' +
+            'syllable, 0 otherwise ("ob-SERV-a-ble" -> [0,1,0,0]). Stressed syllables ' +
+            'are sung with more weight.',
+          items: { type: 'integer' },
+        },
         rhythm: {
           type: 'array',
           description:
@@ -138,6 +146,14 @@ export function buildSubmitText2VoiceTool(
                       description: 'Octave offset: -1, 0 or 1. Use 0 unless deliberately leaping.',
                     },
                     rest: { type: 'boolean', description: 'True for a breath.' },
+                    melisma: {
+                      type: 'boolean',
+                      description:
+                        'True extends the PREVIOUS syllable\'s vowel through this note (a run). ' +
+                        'Only meaningful on the LEAD voice, on a non-rest note directly after ' +
+                        'another non-rest note. Use sparingly: at most one run per phrase, on ' +
+                        'its emotional word.',
+                    },
                   },
                   required: ['degree', 'octave', 'rest'],
                 },
@@ -185,7 +201,11 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     '  leap, step back in the opposite direction.',
     '- Land STRESSED syllables on strong beats and on the longer notes. Never put a weak',
     '  syllable on the longest note of a phrase — that is the mark of a bad setting.',
+    '- Mark the stress array honestly: the renderer leans into stressed syllables.',
     '- Give the phrase\'s most important word the highest note or the longest one.',
+    '- MELISMA (optional): on the LEAD voice you may mark a note melisma:true to extend',
+    '  the previous syllable\'s vowel through it — a run. At most one run per phrase,',
+    '  2-4 notes, on the phrase\'s emotional word. Never after a rest.',
     '- End phrases by settling, usually downward, onto a longer value.',
     '- Keep the whole line inside about an octave and a fifth. Voices sound strained at the',
     '  extremes and this instrument exaggerates that.',
@@ -353,6 +373,13 @@ export function buildSubmitWordsTool(targetSyllables: number): LLMFunctionDeclar
             `The phrase split into syllables, in order — aim for ${targetSyllables}. ` +
             'Concatenated (ignoring spaces and punctuation) they must reproduce the phrase.',
           items: { type: 'string' },
+        },
+        stress: {
+          type: 'array',
+          description:
+            'Lexical stress per syllable, parallel to `syllables`: 1 for a stressed ' +
+            'syllable, 0 otherwise. Stressed syllables are sung with more weight.',
+          items: { type: 'integer' },
         },
       },
       required: ['phrase', 'syllables'],
