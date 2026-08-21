@@ -112,10 +112,15 @@ import {
 
 export const TEXT2VOICE_MAX_TRACKS = 16;
 export const TEXT2VOICE_MODEL = 'gemini-3.1-pro-preview';
+/**
+ * ONE generous ceiling for every model call. Gemini's THINKING tokens share
+ * maxOutputTokens (the ensemble 8/8-failure lesson), so a "right-sized"
+ * budget for a small reply is a time bomb: the model reasons its way through
+ * the budget and dies before emitting the tool call. A ceiling costs nothing
+ * unless used — never differentiate budgets per call size again.
+ */
 export const TEXT2VOICE_MAX_OUTPUT_TOKENS = 49152;
 export const TEXT2VOICE_TEMPERATURE = 0.9;
-/** The reword call returns a phrase and a split — a fraction of a full setting. */
-export const TEXT2VOICE_REWORD_TOKENS = 4096;
 
 const DEFAULT_CONFIG: Text2VoiceConfig = {
   text: '',
@@ -661,9 +666,14 @@ function extractCall(
   // opposite advice from "the model declined", so read it rather than guessing
   // from the message text.
   if (response.candidates?.some((c) => c.finishReason === 'MAX_TOKENS')) {
+    // The "fewer voices / shorter scene" advice is only true for the full
+    // COMPOSE call; a words-only call has neither voices nor scene length.
+    const hint =
+      name === SUBMIT_TEXT2VOICE_TOOL_NAME
+        ? 'Try fewer voices or a shorter scene — rephrasing will not help.'
+        : 'Try again — this is a model hiccup, not something in your text.';
     throw new Error(
-      `The model used its entire ${budget}-token budget before submitting. ` +
-        'Try fewer voices or a shorter scene — rephrasing will not help.',
+      `The model used its entire ${budget}-token budget before submitting. ${hint}`,
     );
   }
   return null;
@@ -716,11 +726,11 @@ async function rewordOntoMelody(
     toolConfig: {
       functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [SUBMIT_WORDS_TOOL_NAME] },
     },
-    generationConfig: { temperature: TEXT2VOICE_TEMPERATURE, maxOutputTokens: TEXT2VOICE_REWORD_TOKENS },
+    generationConfig: { temperature: TEXT2VOICE_TEMPERATURE, maxOutputTokens: TEXT2VOICE_MAX_OUTPUT_TOKENS },
   };
 
   const response = await host.generateWithLLMTools(request);
-  const args = extractCall(response, SUBMIT_WORDS_TOOL_NAME, TEXT2VOICE_REWORD_TOKENS);
+  const args = extractCall(response, SUBMIT_WORDS_TOOL_NAME, TEXT2VOICE_MAX_OUTPUT_TOKENS);
   if (!args || typeof args !== 'object') {
     throw new Error('The model returned no phrase — try different text.');
   }
@@ -808,11 +818,11 @@ async function writeLyricsOntoMelody(
     toolConfig: {
       functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [SUBMIT_LYRICS_TOOL_NAME] },
     },
-    generationConfig: { temperature: TEXT2VOICE_TEMPERATURE, maxOutputTokens: TEXT2VOICE_REWORD_TOKENS },
+    generationConfig: { temperature: TEXT2VOICE_TEMPERATURE, maxOutputTokens: TEXT2VOICE_MAX_OUTPUT_TOKENS },
   };
 
   const response = await host.generateWithLLMTools(request);
-  const args = extractCall(response, SUBMIT_LYRICS_TOOL_NAME, TEXT2VOICE_REWORD_TOKENS);
+  const args = extractCall(response, SUBMIT_LYRICS_TOOL_NAME, TEXT2VOICE_MAX_OUTPUT_TOKENS);
   if (!args || typeof args !== 'object') {
     throw new Error('The model returned no lyrics — try a different topic.');
   }
