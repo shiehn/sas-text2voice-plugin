@@ -93,6 +93,7 @@ import {
   asText2VoiceConfig,
   asText2VoiceMelody,
   asText2VoiceWords,
+  melodyIsReusable,
   planGeneration,
   planReconcile,
   TEXT2VOICE_CONFIG_KEY,
@@ -163,17 +164,15 @@ export async function generateText2Voice(
     await host.deleteSceneData(scene, forceWordsKey).catch(() => {});
   }
 
-  // sourceMode is a LOCAL flavor for this run, not a standing mode: the
-  // lyrics box is always the source of truth, and the write path is only
-  // entered when the ✍ button explicitly asked for it. (The stored field
-  // survives for config compatibility; it is rewritten to 'quote' below.)
+  // The lyrics box is the standing source of truth; the write flavor exists
+  // only inside the ✍ words-only branch below. The stored sourceMode field
+  // survives for config compatibility but the pipeline is always quote.
   const config: typeof storedConfig = {
     ...storedConfig,
     sourceMode: forcedWrite ? 'write' : 'quote',
   };
 
-  const writeMode = config.sourceMode === 'write';
-  if (writeMode) {
+  if (forcedWrite) {
     if (!(config.topic ?? '').trim()) {
       throw new Error('Give ✍ a prompt first — it writes lyrics about something.');
     }
@@ -220,6 +219,51 @@ export async function generateText2Voice(
     quarterNotesPerBar: qnPerBar,
   };
 
+  // ✍ New words is a WORDS-ONLY act: it refreshes the words — and, when
+  // written from a prompt, the lyrics box — then STOPS. Nothing renders;
+  // Sing is the only button that sings. A stale melody is never fitted
+  // against: words fall back to a scene-shaped grid and the next Sing
+  // composes music around them.
+  if (forceWords) {
+    const usableMelody =
+      melody && melodyIsReusable(melody, config, sceneShape) ? melody : null;
+    const wordsMelody = usableMelody ?? syntheticWordsMelody(sceneShape, totalBeats);
+    const newWords = forcedWrite
+      ? await writeLyricsOntoMelody(host, config, wordsMelody, bpm, totalBeats)
+      : await rewordOntoMelody(
+          host,
+          config,
+          melodyCapacity(wordsMelody.voices[0], config.notesPerBeat),
+        );
+    await host.setSceneData(scene, wordsKey, newWords).catch(() => {});
+    if (forcedWrite) {
+      const lyricText = (
+        newWords.lineTexts && newWords.lineTexts.length > 0
+          ? newWords.lineTexts.join('\n')
+          : newWords.phrase
+      ).trim();
+      if (lyricText) {
+        await host
+          .setSceneData(scene, configKey, {
+            ...storedConfig,
+            text: lyricText,
+            sourceMode: 'quote' as const,
+          })
+          .catch(() => {});
+      }
+      host.showToast(
+        'success',
+        'Lyrics written',
+        'They are in the lyrics box — edit freely, then press Sing.',
+      );
+    } else {
+      const preview =
+        newWords.phrase.length > 70 ? `${newWords.phrase.slice(0, 70)}…` : newWords.phrase;
+      host.showToast('success', 'New words picked', `“${preview}” — press Sing to hear it.`);
+    }
+    return;
+  }
+
   const mode: GenerationMode = planGeneration({
     melody,
     words,
@@ -227,7 +271,6 @@ export async function generateText2Voice(
     scene: sceneShape,
     phraseStillInSource,
     forceMelody,
-    forceWords,
   });
 
   let finalMelody: Text2VoiceMelody;
@@ -269,25 +312,30 @@ export async function generateText2Voice(
     };
     await host.setSceneData(scene, melodyKey, finalMelody).catch(() => {});
     // Fresh melody, fresh capacity — the words always refit after an import.
-    finalWords = writeMode
-      ? await writeLyricsOntoMelody(host, config, finalMelody, bpm, totalBeats)
-      : await rewordOntoMelody(
-          host,
-          config,
-          melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
-        );
+    finalWords = await rewordOntoMelody(
+      host,
+      config,
+      melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
+    );
     await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
   } else if (mode === 'compose') {
-    const composed = await composeFromText(host, config, {
-      key: musical.key,
-      mode: musical.mode,
-      bpm,
-      bars,
-      timeSignature: meter,
-      quarterNotesPerBar: qnPerBar,
-      chordSummary: summarizeChords(musical.chordProgression),
-      totalBeats,
-    });
+    const composed = await composeFromText(
+      host,
+      config,
+      {
+        key: musical.key,
+        mode: musical.mode,
+        bpm,
+        bars,
+        timeSignature: meter,
+        quarterNotesPerBar: qnPerBar,
+        chordSummary: summarizeChords(musical.chordProgression),
+        totalBeats,
+      },
+      // Words the user already chose (✍ or an earlier run) survive a compose:
+      // the model writes music FOR them instead of picking a fresh phrase.
+      phraseStillInSource && words ? words.phrase : null,
+    );
     finalMelody = composed.melody;
     finalWords = composed.words;
     await host.setSceneData(scene, melodyKey, finalMelody).catch(() => {});
@@ -297,37 +345,15 @@ export async function generateText2Voice(
     // computed LIVE at the current pace — a stored count went stale the moment
     // the user touched the Pace control.
     finalMelody = melody as Text2VoiceMelody;
-    finalWords = writeMode
-      ? await writeLyricsOntoMelody(host, config, finalMelody, bpm, totalBeats)
-      : await rewordOntoMelody(
-          host,
-          config,
-          melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
-        );
+    finalWords = await rewordOntoMelody(
+      host,
+      config,
+      melodyCapacity(finalMelody.voices[0], config.notesPerBeat),
+    );
     await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
   } else {
     finalMelody = melody as Text2VoiceMelody;
     finalWords = words as Text2VoiceWords;
-  }
-
-  // ✍-written lyrics POPULATE the lyrics box: the model's words become
-  // visible, editable text — the standing source of truth from here on. The
-  // stored mode returns to 'quote' so every later operation reads the box.
-  if (writeMode) {
-    const lyricText = (
-      finalWords.lineTexts && finalWords.lineTexts.length > 0
-        ? finalWords.lineTexts.join('\n')
-        : finalWords.phrase
-    ).trim();
-    if (lyricText) {
-      await host
-        .setSceneData(scene, configKey, {
-          ...storedConfig,
-          text: lyricText,
-          sourceMode: 'quote' as const,
-        })
-        .catch(() => {});
-    }
   }
 
   // Octave-normalize into the ACTIVE style's register first: cached melodies
@@ -650,6 +676,33 @@ function extractCall(
  * of the right length. It is what makes editing the source text affordable once
  * the music is written.
  */
+/**
+ * A scene-shaped stand-in melody for fitting words BEFORE any music exists:
+ * three sung beats then a rest, over the whole scene, so phrase detection
+ * finds real phrases and rhyme budgets have something to budget against.
+ * Never persisted, never rendered — the next Sing composes real music
+ * around the words it helped shape.
+ */
+function syntheticWordsMelody(
+  shape: SceneShapeKey,
+  totalBeats: number,
+): Text2VoiceMelody {
+  const notes: PluginMidiNote[] = [];
+  for (let b = 0; b < Math.max(4, Math.floor(totalBeats)); b++) {
+    if (b % 4 === 3) continue; // the rest that ends each mini-phrase
+    notes.push({ pitch: 60, startBeat: b, durationBeats: 1, velocity: 88 });
+  }
+  return {
+    voices: [notes],
+    composedHarmony: null,
+    bpm: shape.bpm,
+    bars: shape.bars,
+    key: shape.key,
+    mode: shape.mode,
+    quarterNotesPerBar: shape.quarterNotesPerBar,
+  };
+}
+
 async function rewordOntoMelody(
   host: GenerationServices['host'],
   config: Text2VoiceConfig,
@@ -802,16 +855,12 @@ async function composeFromText(
   host: GenerationServices['host'],
   config: Text2VoiceConfig,
   shape: SceneShape,
+  pinnedPhrase?: string | null,
 ): Promise<{ melody: Text2VoiceMelody; words: Text2VoiceWords }> {
   const budget = syllableBudget(shape.bars, shape.quarterNotesPerBar, config.notesPerBeat);
-  const writeMode = config.sourceMode === 'write';
   const ctx: PromptContext = {
-    text: writeMode
-      ? `WRITE ORIGINAL LYRICS about this topic (do not quote anything): ${(config.topic ?? '').trim()}` +
-        (config.rhymeScheme && config.rhymeScheme !== 'none'
-          ? `\nWrite at least four phrases (rest-separated) so an ${config.rhymeScheme} rhyme scheme can land; favor end-rhyme.`
-          : '')
-      : config.text,
+    text: config.text,
+    ...(pinnedPhrase ? { pinnedPhrase } : {}),
     harmony: config.harmony,
     delivery: config.delivery,
     voiceCount: config.voiceCount,
@@ -940,10 +989,7 @@ async function composeFromText(
       phrase: parsed.phrase,
       syllables: parsed.syllables,
       ...(parsed.stress ? { stress: parsed.stress } : {}),
-      source: config.sourceMode === 'write' ? 'write' : 'quote',
-      ...(config.sourceMode === 'write'
-        ? { topic: (config.topic ?? '').trim(), rhymeScheme: config.rhymeScheme ?? 'none' }
-        : {}),
+      source: 'quote',
     },
   };
 }

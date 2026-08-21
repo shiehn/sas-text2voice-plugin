@@ -44,6 +44,8 @@ export interface PromptContext {
   quarterNotesPerBar: number;
   chordSummary: string;
   notesPerBeat: number;
+  /** When set, the model must set EXACTLY this phrase (it occurs in `text`). */
+  pinnedPhrase?: string;
 }
 
 /** How many voices the model must actually compose (derived styles need one). */
@@ -331,7 +333,9 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
 export function buildText2VoiceUserPrompt(ctx: PromptContext): string {
   const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
   return [
-    'Set a phrase from this text as a vocal line:',
+    ctx.pinnedPhrase
+      ? `Set EXACTLY this phrase as the vocal line — do not choose a different one:\n"${ctx.pinnedPhrase}"\n\nIt appears verbatim in this text:`
+      : 'Set a phrase from this text as a vocal line:',
     '',
     '"""',
     ctx.text.trim(),

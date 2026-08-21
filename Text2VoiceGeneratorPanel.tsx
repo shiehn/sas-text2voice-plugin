@@ -182,9 +182,15 @@ function Text2VoiceGroupRow({
       .then((raw) => {
         const cfg = asText2VoiceConfig(raw);
         if (!cfg || cancelled) return;
-        // The TEXT seeds once per anchor and never overwrites typing-in-flight;
-        // the dropdowns are cheap to resync and never hold unsaved keystrokes.
-        if (seededAnchor.current !== anchor.dbId && !textDirty.current) {
+        // The box FOLLOWS the stored text whenever the user is not mid-edit:
+        // typing-in-flight is protected by textDirty, and ✍-written lyrics
+        // must appear in the box the moment their run finishes.
+        if (seededAnchor.current !== anchor.dbId) {
+          // A different reading (scene switch, new group): in-flight typing
+          // belonged to the previous box — never carry it across scenes.
+          textDirty.current = false;
+        }
+        if (!textDirty.current) {
           seededAnchor.current = anchor.dbId;
           setText(cfg.text);
         }
@@ -746,8 +752,8 @@ function Text2VoiceGroupRow({
                 disabled={newWordsDisabled}
                 title={
                   topic.trim()
-                    ? 'Write fresh lyrics about the prompt, fitted to the melody — they land in the lyrics box above'
-                    : 'Pick a fresh phrase from the lyrics box (add a prompt to have lyrics written instead)'
+                    ? 'Words only: write fresh lyrics about the prompt into the box above. Nothing sings until you press Sing.'
+                    : 'Words only: pick a fresh phrase from the lyrics box. Nothing sings until you press Sing. (Add a prompt to have lyrics written instead.)'
                 }
                 className={`px-2 py-1 text-[10px] rounded-sm border transition-colors whitespace-nowrap ${
                   newWordsDisabled

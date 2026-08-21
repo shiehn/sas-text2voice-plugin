@@ -277,20 +277,10 @@ describe('the lyrics box is the single source of truth (wordsReusable + \u270d)'
     expect(plan({ config: writeConfig, words, phraseStillInSource: true })).toBe('render');
   });
 
-  it('\u270d forces new words while keeping a valid melody', () => {
-    expect(plan({ words: writtenWords, phraseStillInSource: true, forceWords: true })).toBe('reword');
-  });
+  // \u270d New words is now a WORDS-ONLY act handled BEFORE planning (it
+  // updates the words and stops — nothing renders), so the planner has no
+  // force-words input anymore; its behavior lives in generateText2Voice.
 
-  it('\u270d never outranks a broken melody — compose wins', () => {
-    expect(
-      plan({
-        scene: { ...scene, bpm: 90 },
-        words: writtenWords,
-        phraseStillInSource: true,
-        forceWords: true,
-      }),
-    ).toBe('compose');
-  });
 
   it('legacy words rows read as quotes', () => {
     const w = asText2VoiceWords({ phrase: 'x y', syllables: ['x', 'y'] });

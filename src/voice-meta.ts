@@ -373,17 +373,14 @@ export function planGeneration(params: {
   phraseStillInSource: boolean;
   /** User explicitly asked for a new melody (the one-shot key). */
   forceMelody?: boolean;
-  /** User explicitly asked for new words (the ✍ one-shot key). */
-  forceWords?: boolean;
 }): GenerationMode {
-  const { melody, words, config, scene, phraseStillInSource, forceMelody, forceWords } = params;
+  const { melody, words, config, scene, phraseStillInSource, forceMelody } = params;
   const imported = config.melodySource === 'imported';
   // An imported melody is a mechanical READ — every path that would compose
   // re-imports instead (tempo change, source-track change, even ♪ New music,
   // which for an import means "re-read the track now").
   if (forceMelody) return imported ? 'import' : 'compose';
   if (!melodyIsReusable(melody, config, scene)) return imported ? 'import' : 'compose';
-  if (forceWords) return 'reword';
   if (!wordsReusable(words, config, phraseStillInSource)) return 'reword';
   return 'render';
 }
