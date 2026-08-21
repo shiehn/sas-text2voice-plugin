@@ -492,7 +492,21 @@ export async function generateText2Voice(
       }))
     : [{ dbId: anchorDbId, engineId: track.handle.id, voiceIndex: 0 }];
 
-  const plan = planReconcile(existing, laneCount);
+  // The renderer's group snapshot can be STALE: tracks deleted by an agent,
+  // another window, or a raced load leave members pointing at engine tracks
+  // that no longer exist — reusing one died mid-run on 'Track not found'
+  // (midmids, 2026-08-20, Sing pressed on a pre-cleanup panel). The main
+  // process is the truth: verify every member against the live plugin tracks
+  // and let dead ones fall out — planReconcile recreates their buckets.
+  const liveIds = new Set((await host.getPluginTracks()).map((h) => h.id));
+  const liveExisting = existing.filter((m) => liveIds.has(m.engineId));
+  if (liveExisting.length < existing.length) {
+    console.warn(
+      `[Text2Voice] ${existing.length - liveExisting.length} group member(s) no longer exist — recreating`,
+    );
+  }
+
+  const plan = planReconcile(liveExisting, laneCount);
 
   if (services.tracks.length + plan.createBucketIndexes.length > TEXT2VOICE_MAX_TRACKS) {
     throw new Error(
@@ -513,6 +527,28 @@ export async function generateText2Voice(
       lanes.push({ dbId: handle.dbId, engineId: handle.id, voiceIndex: bucketIndex });
     }
     lanes.sort((a, b) => a.voiceIndex - b.voiceIndex);
+
+    // If the ANCHOR track itself died (deleted out from under the panel),
+    // bucket 0 now lives on a different dbId — but the reading's config,
+    // melody and words are keyed by the OLD anchor's dbId. Migrate them so
+    // the reading survives the loss of every one of its tracks: the data is
+    // the reading; the tracks are just its current voices.
+    let groupAnchorDbId = anchorDbId;
+    const bucket0 = lanes.find((l) => l.voiceIndex === 0);
+    if (bucket0 && bucket0.dbId !== anchorDbId) {
+      for (const key of [TEXT2VOICE_CONFIG_KEY, TEXT2VOICE_MELODY_KEY, TEXT2VOICE_WORDS_KEY]) {
+        const val = await host
+          .getSceneData(scene, services.trackDataKey(anchorDbId, key))
+          .catch(() => null);
+        if (val !== null && val !== undefined) {
+          await host
+            .setSceneData(scene, services.trackDataKey(bucket0.dbId, key), val)
+            .catch(() => {});
+        }
+      }
+      groupAnchorDbId = bucket0.dbId;
+      console.log(`[Text2Voice] Anchor moved ${anchorDbId} → ${bucket0.dbId}; reading data migrated`);
+    }
 
     // --- render + place, one voice at a time -------------------------------
     for (const lane of lanes) {
@@ -584,13 +620,17 @@ export async function generateText2Voice(
     // --- metas + config last ------------------------------------------------
     for (const lane of lanes) {
       const meta: Text2VoiceMeta = {
-        groupId: anchorDbId,
+        groupId: groupAnchorDbId,
         voiceIndex: lane.voiceIndex,
         label: laneName(lane.voiceIndex),
       };
       await host.setSceneData(scene, services.trackDataKey(lane.dbId, TEXT2VOICE_VOICE_META_KEY), meta);
     }
-    await host.setSceneData(scene, configKey, { ...config, voiceCount: laneCount });
+    await host.setSceneData(
+      scene,
+      services.trackDataKey(groupAnchorDbId, TEXT2VOICE_CONFIG_KEY),
+      { ...config, voiceCount: laneCount },
+    );
   } catch (err) {
     // LIFO rollback: only tracks THIS run created.
     for (const handle of [...created].reverse()) {
