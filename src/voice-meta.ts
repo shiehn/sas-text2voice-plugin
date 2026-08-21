@@ -38,6 +38,13 @@ export const TEXT2VOICE_WORDS_KEY = 'text2voiceWords';
  * The generator deletes it at READ time, before any expensive work.
  */
 export const TEXT2VOICE_FORCE_KEY = 'text2voiceForceMelody';
+/**
+ * One-shot "new words" request (the ✍ button), same delete-at-read contract
+ * as the melody key. Its value is `{ write: boolean }`: true = the model
+ * WRITES fresh lyrics from the prompt and populates the lyrics box; false =
+ * it picks a fresh phrase from the box's current text.
+ */
+export const TEXT2VOICE_FORCE_WORDS_KEY = 'text2voiceForceWords';
 
 /** Guards a pathological paste; scenes hold at most a page or so of prose. */
 export const MAX_TEXT_LENGTH = 20000;
@@ -288,17 +295,17 @@ export function asText2VoiceWords(val: unknown): Text2VoiceWords | null {
  */
 export function wordsReusable(
   words: Text2VoiceWords | null,
-  config: Text2VoiceConfig,
+  _config: Text2VoiceConfig,
   phraseStillInSource: boolean,
 ): boolean {
+  // The LYRICS BOX is the single source of truth for what gets sung: cached
+  // words survive exactly as long as their phrase still occurs in the box.
+  // Model-written lyrics are POPULATED into the box when generated, so the
+  // same rule covers both origins — and the prompt/rhyme controls are
+  // parameters of the ✍ New-words BUTTON, never silent invalidators (editing
+  // a prompt you haven't pressed yet must not re-write your words).
   if (!words) return false;
-  const mode = config.sourceMode ?? 'quote';
-  if (words.source !== mode) return false;
-  if (mode === 'quote') return phraseStillInSource;
-  return (
-    (words.topic ?? '') === (config.topic ?? '') &&
-    (words.rhymeScheme ?? 'none') === (config.rhymeScheme ?? 'none')
-  );
+  return phraseStillInSource;
 }
 
 /** The live scene shape a cached melody must still describe. */
@@ -366,14 +373,17 @@ export function planGeneration(params: {
   phraseStillInSource: boolean;
   /** User explicitly asked for a new melody (the one-shot key). */
   forceMelody?: boolean;
+  /** User explicitly asked for new words (the ✍ one-shot key). */
+  forceWords?: boolean;
 }): GenerationMode {
-  const { melody, words, config, scene, phraseStillInSource, forceMelody } = params;
+  const { melody, words, config, scene, phraseStillInSource, forceMelody, forceWords } = params;
   const imported = config.melodySource === 'imported';
   // An imported melody is a mechanical READ — every path that would compose
   // re-imports instead (tempo change, source-track change, even ♪ New music,
   // which for an import means "re-read the track now").
   if (forceMelody) return imported ? 'import' : 'compose';
   if (!melodyIsReusable(melody, config, scene)) return imported ? 'import' : 'compose';
+  if (forceWords) return 'reword';
   if (!wordsReusable(words, config, phraseStillInSource)) return 'reword';
   return 'render';
 }

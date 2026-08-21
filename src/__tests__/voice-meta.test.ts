@@ -244,7 +244,7 @@ describe('planReconcile', () => {
 });
 
 
-describe('write-mode provenance (wordsReusable through the planner)', () => {
+describe('the lyrics box is the single source of truth (wordsReusable + \u270d)', () => {
   const writeConfig: Text2VoiceConfig = {
     ...config,
     sourceMode: 'write',
@@ -259,41 +259,37 @@ describe('write-mode provenance (wordsReusable through the planner)', () => {
     rhymeScheme: 'AABB',
   };
 
-  it('renders when nothing about the request changed', () => {
-    expect(plan({ config: writeConfig, words: writtenWords, phraseStillInSource: false })).toBe('render');
+  it('cached words survive exactly as long as their phrase is in the box', () => {
+    expect(plan({ words: writtenWords, phraseStillInSource: true })).toBe('render');
+    expect(plan({ words: writtenWords, phraseStillInSource: false })).toBe('reword');
   });
 
-  it('re-words when the topic changed', () => {
+  it('prompt and rhyme are BUTTON parameters — editing them never invalidates', () => {
+    // The old model re-worded the moment topic/rhyme/sourceMode changed under
+    // it; now nothing happens until \u270d is actually pressed.
     expect(
       plan({
-        config: { ...writeConfig, topic: 'the heat death of the universe' },
+        config: { ...writeConfig, topic: 'the heat death of the universe', rhymeScheme: 'ABAB' },
         words: writtenWords,
-        phraseStillInSource: false,
-      }),
-    ).toBe('reword');
-  });
-
-  it('re-words when the rhyme scheme changed', () => {
-    expect(
-      plan({ config: { ...writeConfig, rhymeScheme: 'ABAB' }, words: writtenWords, phraseStillInSource: false }),
-    ).toBe('reword');
-  });
-
-  it('re-words on a sourceMode flip in EITHER direction — quote words cannot serve write', () => {
-    // quote words under a write request:
-    expect(plan({ config: writeConfig, words, phraseStillInSource: true })).toBe('reword');
-    // written words under a quote request (even though the in-source check is moot):
-    expect(plan({ config, words: writtenWords, phraseStillInSource: false })).toBe('reword');
-  });
-
-  it('editing the pasted TEXT in write mode costs nothing', () => {
-    expect(
-      plan({
-        config: { ...writeConfig, text: 'totally different pasted prose' },
-        words: writtenWords,
-        phraseStillInSource: false,
+        phraseStillInSource: true,
       }),
     ).toBe('render');
+    expect(plan({ config: writeConfig, words, phraseStillInSource: true })).toBe('render');
+  });
+
+  it('\u270d forces new words while keeping a valid melody', () => {
+    expect(plan({ words: writtenWords, phraseStillInSource: true, forceWords: true })).toBe('reword');
+  });
+
+  it('\u270d never outranks a broken melody — compose wins', () => {
+    expect(
+      plan({
+        scene: { ...scene, bpm: 90 },
+        words: writtenWords,
+        phraseStillInSource: true,
+        forceWords: true,
+      }),
+    ).toBe('compose');
   });
 
   it('legacy words rows read as quotes', () => {

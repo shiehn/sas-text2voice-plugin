@@ -7,9 +7,14 @@ word) · Trap (triplet flow with an adlib lane echoing into the gaps) ·
 Sprechgesang. A style is a preset over the axes, applied in one write and
 freely overridable ("Custom").
 
-**Sources**: Quote my text (a phrase is quoted verbatim and sung) · Write
-lyrics (original lines about a topic, fitted to the melody's phrases with an
-AABB/ABAB rhyme scheme landing on phrase-final notes) · Sing an existing track
+**The lyrics box is what gets sung.** Type or paste words and a phrase is
+quoted verbatim; or give ✍ **New words** a prompt and the model writes
+original lines — fitted to the melody's phrases, AABB/ABAB rhymes landing on
+phrase-final notes — straight INTO the box, where you can read and edit them.
+Three buttons, one per artifact: **♪ New music** (compose a fresh melody —
+the only action that asks first), **✍ New words** (keep the melody, change
+the words), **Sing** (keep both, re-render the voices — swap voice, style
+treatment, or the Realism dial freely). Also: Sing an existing track
 (any MIDI track in the scene becomes the lead line — monophonized, top note
 wins — at zero model cost).
 

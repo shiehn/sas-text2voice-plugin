@@ -63,6 +63,7 @@ import {
   text2voiceGroupSpec,
   TEXT2VOICE_CONFIG_KEY,
   TEXT2VOICE_FORCE_KEY,
+  TEXT2VOICE_FORCE_WORDS_KEY,
   TEXT2VOICE_MELODY_KEY,
   TEXT2VOICE_VOICE_META_KEY,
   TEXT2VOICE_WORDS_KEY,
@@ -329,8 +330,32 @@ function Text2VoiceGroupRow({
   const memberEngineIds = group.members.map((m) => m.track.handle.id);
   const allMuted = group.members.every((m) => m.track.runtimeState.muted);
   const anySolo = group.members.some((m) => m.track.runtimeState.solo);
-  const generateDisabled =
-    isGenerating || (sourceMode === 'write' ? topic.trim().length === 0 : text.trim().length === 0);
+  const generateDisabled = isGenerating || text.trim().length === 0;
+  const newWordsDisabled =
+    isGenerating || (topic.trim().length === 0 && text.trim().length === 0);
+
+  const requestNewWords = useCallback((): void => {
+    if (!scene) return;
+    // One-shot, delete-at-read (the force-melody contract): with a prompt the
+    // model WRITES lyrics and populates the box; without one it picks a fresh
+    // phrase from the box's current text.
+    void host
+      .setSceneData(scene, ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_FORCE_WORDS_KEY), {
+        write: topic.trim().length > 0,
+      })
+      .then(() => persist({ text, topic, rhymeScheme }))
+      .then(() => ctx.handlers.generate(anchorTrack.handle.id))
+      .catch(() => {});
+  }, [scene, host, ctx.services, ctx.handlers, anchor.dbId, anchorTrack.handle.id, persist, text, topic, rhymeScheme]);
+
+  const requestNewMusic = useCallback((): void => {
+    if (!scene) return;
+    void host
+      .setSceneData(scene, ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_FORCE_KEY), true)
+      .then(() => persist({ text }))
+      .then(() => ctx.handlers.generate(anchorTrack.handle.id))
+      .catch(() => {});
+  }, [scene, host, ctx.services, ctx.handlers, anchor.dbId, anchorTrack.handle.id, persist, text]);
 
   // What will pressing Generate actually cost? Composing the music is the slow
   // step, so the button says which of the three paths it will take rather than
@@ -380,12 +405,6 @@ function Text2VoiceGroupRow({
     void persist({ ...axes, style: id });
   };
 
-  const MODE_LABEL: Record<GenerationMode, string> = {
-    compose: 'Compose',
-    import: 'Import + Word',
-    reword: 'Re-word',
-    render: 'Re-render',
-  };
   const NEXT_SUMMARY: Record<GenerationMode, string> = {
     compose: 'new music + new words',
     import: 'read the track + fit words',
@@ -399,13 +418,17 @@ function Text2VoiceGroupRow({
     render: 'Nothing to compose — re-renders the existing music and words with the current voice.',
   };
 
-  const regenerate = useRegenerateGuard({
-    hasMidi: !!words,
-    onGenerate: generateNow,
+  // Confirm only what is destructive: composing over a melody you may love.
+  // Sing and ✍ New words never confirm — re-rendering voices and refitting
+  // words ARE the iteration loop, and both leave the melody untouched.
+  const newMusicGuard = useRegenerateGuard({
+    hasMidi: !!melody,
+    onGenerate: requestNewMusic,
     subject: 'This reading',
-    detail: `All ${group.members.length} ${
-      group.members.length === 1 ? 'voice is' : 'voices are'
-    } re-rendered.`,
+    title: importedTrackDbId ? 'Re-import the melody?' : 'Replace the music?',
+    message: importedTrackDbId
+      ? 'The source track is re-read and the words refit to it. Every voice re-renders.'
+      : 'Composing writes a fresh melody — the current one is gone for good. The words refit to the new music and every voice re-renders.',
     testIdPrefix: `text2voice-group-regenerate-confirm-${group.groupId}`,
   });
 
@@ -591,9 +614,13 @@ function Text2VoiceGroupRow({
         </select>
 
         <button
-          onClick={regenerate.request}
+          onClick={generateNow}
           disabled={generateDisabled}
-          title={text.trim().length === 0 ? 'Paste some text first' : MODE_HINT[plannedMode]}
+          title={
+            text.trim().length === 0
+              ? 'The lyrics box is empty — type words, or ✍-write some'
+              : MODE_HINT[plannedMode]
+          }
           className={`px-2 py-0.5 text-[10px] font-medium rounded-sm border transition-colors ${
             generateDisabled
               ? 'bg-sas-panel border-sas-border text-sas-muted/50 cursor-not-allowed'
@@ -601,30 +628,27 @@ function Text2VoiceGroupRow({
           }`}
           data-testid="text2voice-generate"
         >
-          {isGenerating ? 'Working…' : MODE_LABEL[plannedMode]}
+          {isGenerating ? 'Working…' : 'Sing'}
         </button>
 
         {/* Composing is the slow step, so asking for different music is an
             explicit act rather than a side effect of editing anything else. */}
         <button
           onClick={() => {
-            if (!scene) return;
-            // The request rides its OWN one-shot key: as a config field it
-            // latched on failed runs and was erased by any dropdown persist.
-            void host
-              .setSceneData(scene, ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_FORCE_KEY), true)
-              .then(() => persist({ text }))
-              .then(() => ctx.handlers.generate(anchorTrack.handle.id))
-              .catch(() => {});
+            if (!melody) {
+              requestNewMusic();
+              return;
+            }
+            newMusicGuard.request();
           }}
-          disabled={generateDisabled || !melody}
+          disabled={generateDisabled}
           title={
             importedTrackDbId
               ? 'Re-read the source track now — the melody re-imports and the words refit'
               : 'Compose different music — discards the current melody (the words refit to the new one)'
           }
           className={`px-1.5 py-0.5 text-[10px] rounded-sm border transition-colors whitespace-nowrap ${
-            generateDisabled || !melody
+            generateDisabled
               ? 'bg-sas-panel border-sas-border text-sas-muted/40 cursor-not-allowed'
               : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent hover:text-sas-accent'
           }`}
@@ -632,6 +656,7 @@ function Text2VoiceGroupRow({
         >
           ♪ New music
         </button>
+        {newMusicGuard.dialog}
 
         <button
           onClick={() => ctx.setGroupMute(memberEngineIds, !allMuted)}
@@ -668,57 +693,16 @@ function Text2VoiceGroupRow({
         <>
           {/* --- the text area: the panel's whole point ------------------- */}
           <div className="px-2 pt-2 pb-1">
-            <div className="flex items-center gap-2 mb-1.5">
-              {(['quote', 'write'] as const).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => {
-                    setSourceMode(m);
-                    void persist({ sourceMode: m });
-                  }}
-                  className={`px-2 py-0.5 text-[10px] rounded-sm border transition-colors ${
-                    sourceMode === m
-                      ? 'bg-sas-accent/20 border-sas-accent text-sas-accent'
-                      : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent'
-                  }`}
-                  data-testid={`text2voice-source-${m}`}
-                >
-                  {m === 'quote' ? 'Quote my text' : 'Write lyrics'}
-                </button>
-              ))}
-              {sourceMode === 'write' && (
-                <select
-                  value={rhymeScheme}
-                  onChange={(e) => {
-                    const next = e.target.value === 'AABB' || e.target.value === 'ABAB' ? e.target.value : 'none';
-                    setRhymeScheme(next);
-                    void persist({ rhymeScheme: next });
-                  }}
-                  title="Rhyme scheme — targets the phrase-final syllables. Degrades to pairs when the melody has fewer than four phrases."
-                  className={SELECT_CLASS}
-                  data-testid="text2voice-rhyme"
-                >
-                  <option value="none">No rhyme</option>
-                  <option value="AABB">AABB</option>
-                  <option value="ABAB">ABAB</option>
-                </select>
-              )}
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-[9px] uppercase tracking-wide text-sas-muted">
+                Lyrics — what gets sung
+              </span>
             </div>
-            {sourceMode === 'write' ? (
-              <input
-                type="text"
-                value={topic}
-                placeholder="What should the lyrics be about? e.g. a robot falling in love"
-                maxLength={500}
-                onChange={(e) => setTopic(e.target.value)}
-                onBlur={() => void persist({ topic })}
-                className="w-full bg-sas-panel border border-sas-border rounded-sm px-2 py-1.5 text-xs text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
-                data-testid="text2voice-topic"
-              />
-            ) : (
             <textarea
               value={text}
-              placeholder="Paste text here — an article, a paragraph, anything. A phrase from it will be quoted and sung."
+              placeholder={
+                'Type or paste the words to sing — or give \u270d a prompt below and it writes lyrics here, fitted to the melody.'
+              }
               maxLength={MAX_TEXT_LENGTH}
               rows={5}
               onChange={(e) => {
@@ -729,7 +713,52 @@ function Text2VoiceGroupRow({
               className="w-full resize-y bg-sas-panel border border-sas-border rounded-sm px-2 py-1.5 text-xs leading-relaxed text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
               data-testid="text2voice-text"
             />
-            )}
+            {/* ✍ writes INTO the box above: prompt and rhyme are parameters of
+                the button, not a mode — editing them never invalidates words. */}
+            <div className="flex items-center gap-1.5 mt-1.5">
+              <input
+                type="text"
+                value={topic}
+                placeholder="✍ prompt — what should the lyrics be about?"
+                maxLength={500}
+                onChange={(e) => setTopic(e.target.value)}
+                onBlur={() => void persist({ topic })}
+                className="flex-1 bg-sas-panel border border-sas-border rounded-sm px-2 py-1 text-[11px] text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
+                data-testid="text2voice-topic"
+              />
+              <select
+                value={rhymeScheme}
+                onChange={(e) => {
+                  const next = e.target.value === 'AABB' || e.target.value === 'ABAB' ? e.target.value : 'none';
+                  setRhymeScheme(next);
+                  void persist({ rhymeScheme: next });
+                }}
+                title="Rhyme scheme for ✍-written lyrics — targets the phrase-final syllables. Degrades to pairs when the melody has fewer than four phrases."
+                className={SELECT_CLASS}
+                data-testid="text2voice-rhyme"
+              >
+                <option value="none">No rhyme</option>
+                <option value="AABB">AABB</option>
+                <option value="ABAB">ABAB</option>
+              </select>
+              <button
+                onClick={requestNewWords}
+                disabled={newWordsDisabled}
+                title={
+                  topic.trim()
+                    ? 'Write fresh lyrics about the prompt, fitted to the melody — they land in the lyrics box above'
+                    : 'Pick a fresh phrase from the lyrics box (add a prompt to have lyrics written instead)'
+                }
+                className={`px-2 py-1 text-[10px] rounded-sm border transition-colors whitespace-nowrap ${
+                  newWordsDisabled
+                    ? 'bg-sas-panel border-sas-border text-sas-muted/40 cursor-not-allowed'
+                    : 'bg-sas-panel border-sas-border text-sas-muted hover:border-sas-accent hover:text-sas-accent'
+                }`}
+                data-testid="text2voice-new-words"
+              >
+                {'\u270d'} New words
+              </button>
+            </div>
             <div className="flex items-center justify-between mt-1 gap-2">
               <span className="text-[9px] text-sas-muted truncate">
                 <span className="text-sas-muted/80" data-testid="text2voice-next">
@@ -743,10 +772,8 @@ function Text2VoiceGroupRow({
                       <span className="text-sas-accent"> · melody kept</span>
                     )}
                   </>
-                ) : sourceMode === 'write' ? (
-                  'Original lyrics about your topic will be written to fit the melody.'
                 ) : (
-                  'A phrase that fits the scene will be chosen from this text.'
+                  'A phrase that fits the scene will be chosen from the lyrics box.'
                 )}
               </span>
               <div className="flex items-center gap-2 shrink-0">
@@ -936,7 +963,6 @@ function Text2VoiceGroupRow({
           onCancel={() => setConfirmDelete(false)}
         />
       )}
-      {regenerate.dialog}
     </div>
   );
 }

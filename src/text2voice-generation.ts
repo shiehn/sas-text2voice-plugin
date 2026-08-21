@@ -97,6 +97,7 @@ import {
   planReconcile,
   TEXT2VOICE_CONFIG_KEY,
   TEXT2VOICE_FORCE_KEY,
+  TEXT2VOICE_FORCE_WORDS_KEY,
   TEXT2VOICE_MELODY_KEY,
   TEXT2VOICE_VOICE_META_KEY,
   TEXT2VOICE_WORDS_KEY,
@@ -147,16 +148,39 @@ export async function generateText2Voice(
   const melodyKey = services.trackDataKey(anchorDbId, TEXT2VOICE_MELODY_KEY);
   const wordsKey = services.trackDataKey(anchorDbId, TEXT2VOICE_WORDS_KEY);
 
-  const config =
+  const storedConfig =
     asText2VoiceConfig(await host.getSceneData(scene, configKey).catch(() => null)) ?? DEFAULT_CONFIG;
+
+  // The one-shot "✍ New words" request — delete-at-read, like force-melody.
+  // Its `write` flag decides the FLAVOR of the next words operation: model
+  // writes fresh lyrics from the prompt, or picks a fresh quote from the box.
+  const forceWordsKey = services.trackDataKey(anchorDbId, TEXT2VOICE_FORCE_WORDS_KEY);
+  const forceWordsRaw = await host.getSceneData(scene, forceWordsKey).catch(() => null);
+  const forceWords =
+    !!forceWordsRaw && typeof forceWordsRaw === 'object' && 'write' in forceWordsRaw;
+  const forcedWrite = forceWords && (forceWordsRaw as { write?: unknown }).write === true;
+  if (forceWordsRaw !== null) {
+    await host.deleteSceneData(scene, forceWordsKey).catch(() => {});
+  }
+
+  // sourceMode is a LOCAL flavor for this run, not a standing mode: the
+  // lyrics box is always the source of truth, and the write path is only
+  // entered when the ✍ button explicitly asked for it. (The stored field
+  // survives for config compatibility; it is rewritten to 'quote' below.)
+  const config: typeof storedConfig = {
+    ...storedConfig,
+    sourceMode: forcedWrite ? 'write' : 'quote',
+  };
 
   const writeMode = config.sourceMode === 'write';
   if (writeMode) {
     if (!(config.topic ?? '').trim()) {
-      throw new Error('Give it a topic first — Write mode invents lyrics about something.');
+      throw new Error('Give ✍ a prompt first — it writes lyrics about something.');
     }
   } else if (!config.text.trim()) {
-    throw new Error('Paste some text first — Text2Voice sings words from the text you supply.');
+    throw new Error(
+      'The lyrics box is empty — type words to sing, or use ✍ with a prompt to write some.',
+    );
   }
 
   // --- musical context ------------------------------------------------------
@@ -182,12 +206,11 @@ export async function generateText2Voice(
     await host.deleteSceneData(scene, forceKey).catch(() => {});
   }
 
-  // Quote mode: a phrase no longer present in the (edited) text has to be
-  // replaced; one still present is kept. Write mode ignores the pasted text
-  // entirely — its reusability is provenance (topic/rhyme), checked in
-  // wordsReusable via the planner.
+  // The lyrics box is the source of truth: cached words survive exactly as
+  // long as their phrase still occurs in it. Model-written lyrics were
+  // populated INTO the box when generated, so one rule covers both origins.
   const phraseStillInSource =
-    !writeMode && words ? validatePhraseInSource(words.phrase, config.text).ok : false;
+    words !== null && validatePhraseInSource(words.phrase, config.text).ok;
 
   const sceneShape: SceneShapeKey = {
     bpm,
@@ -204,6 +227,7 @@ export async function generateText2Voice(
     scene: sceneShape,
     phraseStillInSource,
     forceMelody,
+    forceWords,
   });
 
   let finalMelody: Text2VoiceMelody;
@@ -284,6 +308,26 @@ export async function generateText2Voice(
   } else {
     finalMelody = melody as Text2VoiceMelody;
     finalWords = words as Text2VoiceWords;
+  }
+
+  // ✍-written lyrics POPULATE the lyrics box: the model's words become
+  // visible, editable text — the standing source of truth from here on. The
+  // stored mode returns to 'quote' so every later operation reads the box.
+  if (writeMode) {
+    const lyricText = (
+      finalWords.lineTexts && finalWords.lineTexts.length > 0
+        ? finalWords.lineTexts.join('\n')
+        : finalWords.phrase
+    ).trim();
+    if (lyricText) {
+      await host
+        .setSceneData(scene, configKey, {
+          ...storedConfig,
+          text: lyricText,
+          sourceMode: 'quote' as const,
+        })
+        .catch(() => {});
+    }
   }
 
   // Octave-normalize into the ACTIVE style's register first: cached melodies
