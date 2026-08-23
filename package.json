@@ -1,6 +1,6 @@
 {
   "name": "@signalsandsorcery/text2voice-generator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Text2Voice — paste prose, and a system speech voice is forced onto S&S-generated MIDI pitches: harmony, counterpoint and canon sung by machine voices. Offline render, one audio track per voice.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

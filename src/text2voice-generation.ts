@@ -136,6 +136,16 @@ export async function generateText2Voice(
   services: GenerationServices,
 ): Promise<void> {
   const host = services.host;
+  // Progress reporting (SDK 3.11.0): the render loop reports before the first
+  // lane and after every lane, with an honest bar floor of base + span·(done/total).
+  const loopStep = (stage: string, label: string, done: number, total: number, base: number, span: number): void =>
+    services.reportStep?.({
+      stage,
+      label,
+      done,
+      total,
+      percentFloor: base + Math.round((span * done) / Math.max(total, 1)),
+    });
   const scene = services.activeSceneId;
   if (!scene) throw new Error('No active scene.');
 
@@ -233,6 +243,7 @@ export async function generateText2Voice(
     const usableMelody =
       melody && melodyIsReusable(melody, config, sceneShape) ? melody : null;
     const wordsMelody = usableMelody ?? syntheticWordsMelody(sceneShape, totalBeats);
+    services.reportStep?.({ stage: 'compose', label: 'WRITING WORDS...' });
     const newWords = forcedWrite
       ? await writeLyricsOntoMelody(host, config, wordsMelody, bpm, totalBeats)
       : await rewordOntoMelody(
@@ -317,6 +328,7 @@ export async function generateText2Voice(
     };
     await host.setSceneData(scene, melodyKey, finalMelody).catch(() => {});
     // Fresh melody, fresh capacity — the words always refit after an import.
+    services.reportStep?.({ stage: 'compose', label: 'FITTING WORDS...' });
     finalWords = await rewordOntoMelody(
       host,
       config,
@@ -324,6 +336,7 @@ export async function generateText2Voice(
     );
     await host.setSceneData(scene, wordsKey, finalWords).catch(() => {});
   } else if (mode === 'compose') {
+    services.reportStep?.({ stage: 'compose', label: 'WRITING MELODY...' });
     const composed = await composeFromText(
       host,
       config,
@@ -350,6 +363,7 @@ export async function generateText2Voice(
     // computed LIVE at the current pace — a stored count went stale the moment
     // the user touched the Pace control.
     finalMelody = melody as Text2VoiceMelody;
+    services.reportStep?.({ stage: 'compose', label: 'FITTING WORDS...' });
     finalWords = await rewordOntoMelody(
       host,
       config,
@@ -521,10 +535,14 @@ export async function generateText2Voice(
 
   try {
     for (const r of plan.reuse) lanes.push({ ...r, voiceIndex: r.bucketIndex });
+    const createTotal = plan.createBucketIndexes.length;
+    let createDone = 0;
+    if (createTotal > 0) loopStep('create-tracks', 'CREATING VOICE LANES', 0, createTotal, 15, 5);
     for (const bucketIndex of plan.createBucketIndexes) {
       const handle = await services.createFamilyTrack(`-v${bucketIndex}`);
       created.push(handle);
       lanes.push({ dbId: handle.dbId, engineId: handle.id, voiceIndex: bucketIndex });
+      loopStep('create-tracks', 'CREATING VOICE LANES', ++createDone, createTotal, 15, 5);
     }
     lanes.sort((a, b) => a.voiceIndex - b.voiceIndex);
 
@@ -551,7 +569,9 @@ export async function generateText2Voice(
     }
 
     // --- render + place, one voice at a time -------------------------------
+    let renderDone = 0;
     for (const lane of lanes) {
+      loopStep('render-voices', 'RENDERING VOICES', renderDone++, lanes.length, 25, 65);
       const request = buildVocalLineRequest(
         assignments[lane.voiceIndex] ?? [],
         syllables,
@@ -609,6 +629,8 @@ export async function generateText2Voice(
       }
     }
 
+    loopStep('render-voices', 'RENDERING VOICES', lanes.length, lanes.length, 25, 65);
+
     if (silentLanes.length > 0) {
       host.showToast(
         'info',
@@ -618,6 +640,7 @@ export async function generateText2Voice(
     }
 
     // --- metas + config last ------------------------------------------------
+    services.reportStep?.({ stage: 'save', label: 'SAVING LANES...', percentFloor: 92 });
     for (const lane of lanes) {
       const meta: Text2VoiceMeta = {
         groupId: groupAnchorDbId,

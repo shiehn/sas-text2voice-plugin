@@ -21,7 +21,7 @@ import manifest from './plugin.json';
 class Text2VoiceGeneratorPlugin implements GeneratorPlugin {
   readonly id = '@signalsandsorcery/text2voice-generator';
   readonly displayName = 'Text2Voice';
-  readonly version = '0.1.0';
+  readonly version = '0.2.0';
   readonly description =
     'Text2Voice — paste prose and have it sung: an LLM quotes a phrase and sets it over the scene, ' +
     'then each syllable is spoken by a system voice and forced onto its note. One audio track per voice.';
