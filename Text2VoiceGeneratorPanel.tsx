@@ -58,6 +58,8 @@ import {
   MAX_TEXT_LENGTH,
   planGeneration,
   type Text2VoiceWords,
+  planVoiceDelete,
+  readingDeleteMessage,
   stampText2VoiceAnchor,
   text2voiceGroupIsComplete,
   text2voiceGroupSpec,
@@ -65,8 +67,8 @@ import {
   TEXT2VOICE_FORCE_KEY,
   TEXT2VOICE_FORCE_WORDS_KEY,
   TEXT2VOICE_MELODY_KEY,
-  TEXT2VOICE_VOICE_META_KEY,
   TEXT2VOICE_WORDS_KEY,
+  type VoiceMemberRef,
   type GenerationMode,
   type SceneShapeKey,
   type Text2VoiceMelody,
@@ -438,15 +440,23 @@ function Text2VoiceGroupRow({
     testIdPrefix: `text2voice-group-regenerate-confirm-${group.groupId}`,
   });
 
+  const voiceRefs: VoiceMemberRef[] = group.members.map((m) => ({
+    dbId: m.dbId,
+    engineId: m.track.handle.id,
+    voiceIndex: m.meta.voiceIndex,
+  }));
+  const readingMessage = readingDeleteMessage(group.members.length);
+  // The header ✕ and the anchor row's ✕ are the same gesture: the anchor
+  // (voice 0) holds ALL the reading's scene-data — text, melody, words — so
+  // deleting it alone would leave headless harmony lanes. A harmony's ✕
+  // removes just that lane. (The anchor's ✕ used to bail silently behind a
+  // "Delete track?" dialog — a dead affordance; now its dialog says "reading".)
+  const runVoiceDelete = (target?: VoiceMemberRef): void => {
+    const plan = planVoiceDelete(voiceRefs, target);
+    void ctx.deleteGroup(plan.members, plan.cleanupKeySuffixes);
+  };
   const handleVoiceDelete = (member: (typeof group.members)[number]): void => {
-    // The anchor (voice 0) holds ALL the group's scene-data — text, melody,
-    // words. Deleting it orphans the reading, so its row never offers delete;
-    // removing the whole reading goes through the group ✕.
-    if (member.meta.voiceIndex === 0) return;
-    void ctx.deleteGroup(
-      [{ engineId: member.track.handle.id, dbId: member.dbId }],
-      [TEXT2VOICE_VOICE_META_KEY, 'prompt', 'role', 'groupUi'],
-    );
+    runVoiceDelete({ dbId: member.dbId, engineId: member.track.handle.id, voiceIndex: member.meta.voiceIndex });
   };
 
   return (
@@ -939,6 +949,9 @@ function Text2VoiceGroupRow({
                 onGenerate: undefined,
                 onCopy: undefined,
                 onDelete: () => handleVoiceDelete(m),
+                ...(m.meta.voiceIndex === 0
+                  ? { deleteConfirm: { title: 'Delete reading?', message: readingMessage } }
+                  : {}),
               }),
             )}
           </div>
@@ -949,22 +962,11 @@ function Text2VoiceGroupRow({
         <ConfirmDialog
           open={confirmDelete}
           title="Delete reading?"
-          message={`Removes all ${group.members.length} voice tracks and the text.`}
+          message={readingMessage}
           confirmLabel="Delete"
           onConfirm={() => {
             setConfirmDelete(false);
-            void ctx.deleteGroup(
-              group.members.map((m) => ({ engineId: m.track.handle.id, dbId: m.dbId })),
-              [
-                TEXT2VOICE_VOICE_META_KEY,
-                TEXT2VOICE_CONFIG_KEY,
-                TEXT2VOICE_MELODY_KEY,
-                TEXT2VOICE_WORDS_KEY,
-                'prompt',
-                'role',
-                'groupUi',
-              ],
-            );
+            runVoiceDelete();
           }}
           onCancel={() => setConfirmDelete(false)}
         />

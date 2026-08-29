@@ -418,3 +418,69 @@ export function planReconcile(existing: ReconcileMember[], bucketCount: number):
   }
   return { reuse, createBucketIndexes, remove };
 }
+
+// --- deleting voices ---
+
+/** Scene-data suffixes every voice row carries (member-scoped). */
+export const VOICE_DELETE_CLEANUP_SUFFIXES: readonly string[] = [
+  TEXT2VOICE_VOICE_META_KEY,
+  'prompt',
+  'role',
+  'groupUi',
+];
+
+/** The anchor's keys: the member set plus the reading-scoped artifacts. */
+export const READING_DELETE_CLEANUP_SUFFIXES: readonly string[] = [
+  TEXT2VOICE_VOICE_META_KEY,
+  TEXT2VOICE_CONFIG_KEY,
+  TEXT2VOICE_MELODY_KEY,
+  TEXT2VOICE_WORDS_KEY,
+  'prompt',
+  'role',
+  'groupUi',
+];
+
+export interface VoiceMemberRef {
+  dbId: string;
+  engineId: string;
+  voiceIndex: number;
+}
+
+export interface VoiceDeletePlan {
+  /** `reading` = every voice + the anchor's text/melody/words; `voice` = one harmony lane. */
+  scope: 'reading' | 'voice';
+  members: Array<{ engineId: string; dbId: string }>;
+  cleanupKeySuffixes: string[];
+}
+
+/**
+ * What a delete gesture removes. The anchor (voice 0) holds ALL the reading's
+ * scene-data — text, melody, words — so deleting it alone would orphan the
+ * harmonies as a headless group: its ✕ (and the header ✕, `target` omitted)
+ * removes the whole reading, anchor last. A harmony voice's ✕ removes just
+ * that lane. Pure — the panel feeds the result to `ctx.deleteGroup`.
+ */
+export function planVoiceDelete(members: VoiceMemberRef[], target?: VoiceMemberRef): VoiceDeletePlan {
+  if (target && target.voiceIndex !== 0) {
+    return {
+      scope: 'voice',
+      members: [{ engineId: target.engineId, dbId: target.dbId }],
+      cleanupKeySuffixes: [...VOICE_DELETE_CLEANUP_SUFFIXES],
+    };
+  }
+  // Harmonies first, anchor last: a delete that dies midway leaves a reading
+  // with fewer voices rather than headless lanes.
+  const ordered = [...members].sort((a, b) => b.voiceIndex - a.voiceIndex);
+  return {
+    scope: 'reading',
+    members: ordered.map((m) => ({ engineId: m.engineId, dbId: m.dbId })),
+    cleanupKeySuffixes: [...READING_DELETE_CLEANUP_SUFFIXES],
+  };
+}
+
+/** Confirmation copy for removing a whole reading of `voiceCount` voices. */
+export function readingDeleteMessage(voiceCount: number): string {
+  return voiceCount === 1
+    ? 'Removes the voice track and the text.'
+    : `Removes all ${voiceCount} voice tracks and the text.`;
+}
