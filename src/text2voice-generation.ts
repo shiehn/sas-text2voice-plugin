@@ -30,6 +30,7 @@ import type {
   PluginTrackHandle,
 } from '@signalsandsorcery/plugin-sdk';
 import {
+  LLM_MODEL,
   panelMeter,
   panelQuarterNotesPerBar,
 } from '@signalsandsorcery/plugin-sdk';
@@ -111,7 +112,7 @@ import {
 } from './voice-meta';
 
 export const TEXT2VOICE_MAX_TRACKS = 16;
-export const TEXT2VOICE_MODEL = 'gemini-3.1-pro-preview';
+export const TEXT2VOICE_MODEL = LLM_MODEL.BEST;
 /**
  * ONE generous ceiling for every model call. Gemini's THINKING tokens share
  * maxOutputTokens (the ensemble 8/8-failure lesson), so a "right-sized"
