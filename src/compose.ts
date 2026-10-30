@@ -86,7 +86,20 @@ function asFiniteNumber(v: unknown, fallback: number): number {
  * unusable throws; anything merely out of range is clamped, because a single
  * bad slot should not discard an otherwise good setting.
  */
-export function parseText2VoiceArgs(args: unknown): ParsedComposition {
+export interface ParseOptions {
+  /**
+   * S-443: how many melody notes to read. 'syllables' (the default, as always)
+   * reads one note per returned syllable. 'rhythm' reads one note per rhythm
+   * value: composing for words already written (bar-budget lines), where a
+   * syllable may hold through several notes, so the notes outnumber them.
+   */
+  sizeBy?: 'syllables' | 'rhythm';
+}
+
+/** The most notes a rhythm-sized melody may have. */
+export const MAX_RHYTHM_NOTES = 256;
+
+export function parseText2VoiceArgs(args: unknown, opts: ParseOptions = {}): ParsedComposition {
   if (!args || typeof args !== 'object') throw new CompositionError('empty tool arguments');
   const a = args as Record<string, unknown>;
 
@@ -101,8 +114,10 @@ export function parseText2VoiceArgs(args: unknown): ParsedComposition {
   if (syllables.length === 0) throw new CompositionError('no syllables returned');
 
   const rawRhythm = Array.isArray(a.rhythm) ? a.rhythm : [];
+  const noteCount =
+    opts.sizeBy === 'rhythm' && rawRhythm.length > 0 ? Math.min(MAX_RHYTHM_NOTES, rawRhythm.length) : syllables.length;
   const rhythm: number[] = [];
-  for (let i = 0; i < syllables.length; i++) {
+  for (let i = 0; i < noteCount; i++) {
     // Clamp to a musically sane slot; default to an eighth when absent.
     const v = asFiniteNumber(rawRhythm[i], 0.5);
     rhythm.push(Math.max(0.125, Math.min(8, v)));
@@ -115,7 +130,7 @@ export function parseText2VoiceArgs(args: unknown): ParsedComposition {
     const v = rv as Record<string, unknown>;
     const rawNotes = Array.isArray(v.notes) ? v.notes : [];
     const notes: GridSlot[] = [];
-    for (let i = 0; i < syllables.length; i++) {
+    for (let i = 0; i < noteCount; i++) {
       const rn = rawNotes[i];
       if (!rn || typeof rn !== 'object') {
         // Missing slot — rest rather than inventing a pitch.

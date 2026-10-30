@@ -136,6 +136,15 @@ export interface Text2VoiceConfig {
   melodySource?: 'composed' | 'imported';
   /** The scene track (tracks.id) the melody is read from, when imported. */
   importedTrackDbId?: string;
+  /**
+   * S-443: what the lyrics box shows and Sing sings. 'scene' (absent) = the
+   * box is this scene's own words, as always; 'song' = the box is this scene's
+   * section of the song (the host's song lyric document), ✍ writes the whole
+   * song and Sing sings the section.
+   */
+  view?: 'scene' | 'song';
+  /** S-443: the scene's own box text, kept aside while Song view shows the song's section in the box. */
+  sceneText?: string;
 }
 
 export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
@@ -163,6 +172,8 @@ export function asText2VoiceConfig(val: unknown): Text2VoiceConfig | null {
   }
   config.melodySource = c.melodySource === 'imported' ? 'imported' : 'composed';
   if (typeof c.importedTrackDbId === 'string') config.importedTrackDbId = c.importedTrackDbId;
+  if (c.view === 'song' || c.view === 'scene') config.view = c.view;
+  if (typeof c.sceneText === 'string') config.sceneText = c.sceneText.slice(0, MAX_TEXT_LENGTH);
   // A composed harmony cannot be jointly written FOR an imported lead — coerce
   // to the nearest derived style so the fan-out still works.
   if (config.melodySource === 'imported' && isComposedHarmony(config.harmony)) {
@@ -231,6 +242,15 @@ export interface Text2VoiceWords {
    * the exact materialization (and its word spans) deterministically. */
   lines?: string[][];
   lineTexts?: string[];
+  /**
+   * S-443: 'lines' = written to the bar budget (song-budget.ts), one line per
+   * phrase: Sing lays line k on the melody's phrase k, holding a syllable
+   * through several notes when the line is shorter (line-fit.ts), instead of
+   * spreading one phrase over the whole melody.
+   */
+  fit?: 'lines';
+  /** S-443: the song section (arrangement instanceId) these words are, when they came from the song. */
+  sectionId?: string;
 }
 
 export function asText2VoiceMelody(val: unknown): Text2VoiceMelody | null {
@@ -284,6 +304,8 @@ export function asText2VoiceWords(val: unknown): Text2VoiceWords | null {
   if (Array.isArray(w.lineTexts)) {
     words.lineTexts = w.lineTexts.filter((x): x is string => typeof x === 'string');
   }
+  if (w.fit === 'lines' && words.lines && words.lines.length > 0) words.fit = 'lines';
+  if (typeof w.sectionId === 'string' && w.sectionId) words.sectionId = w.sectionId;
   return words;
 }
 

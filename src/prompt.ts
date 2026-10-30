@@ -46,6 +46,28 @@ export interface PromptContext {
   notesPerBeat: number;
   /** When set, the model must set EXACTLY this phrase (it occurs in `text`). */
   pinnedPhrase?: string;
+  /**
+   * S-443: written lines to compose FOR (bar-budget words): one phrase per
+   * line, a breath between lines; a syllable may hold through several notes.
+   * Overrides the phrase choice and the syllable aim.
+   */
+  pinnedLines?: Array<{ text: string; syllables: number }>;
+  /** S-443: the melody-note range to ask for, when the caller sized it (pinned lines). */
+  noteRange?: { min: number; max: number };
+}
+
+/**
+ * S-443: how many melody notes to ask for when composing for written lines.
+ * A slow budget gives fewer syllables than the style's note range would fill:
+ * then ask for about two to three notes per syllable (each syllable held
+ * through its run, S-442), inside the style's range. A dense budget keeps the
+ * style's range (long notes recite several syllables).
+ */
+export function linesNoteRange(syllables: number, base: { min: number; max: number }): { min: number; max: number } {
+  if (syllables >= base.min) return base;
+  const min = Math.max(1, Math.min(base.max, Math.max(syllables, Math.ceil(syllables * 2))));
+  const max = Math.max(min, Math.min(base.max, Math.max(base.min, syllables * 3)));
+  return { min, max };
 }
 
 /** How many voices the model must actually compose (derived styles need one). */
@@ -172,7 +194,7 @@ export function buildSubmitText2VoiceTool(
 
 export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
   const nVoices = composedVoiceCount(ctx.harmony, ctx.voiceCount);
-  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
+  const notes = ctx.noteRange ?? melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
   const totalBeats = ctx.bars * ctx.quarterNotesPerBar;
   const lines: string[] = [];
 
@@ -327,11 +349,40 @@ export function buildText2VoiceSystemPrompt(ctx: PromptContext): string {
     `- Call ${SUBMIT_TEXT2VOICE_TOOL_NAME} exactly once. Return nothing else.`,
   );
 
+  if (ctx.pinnedLines && ctx.pinnedLines.length > 0) {
+    lines.push('', ...pinnedLinesRules(ctx.pinnedLines, notes));
+  }
+
   return lines.join('\n');
 }
 
+/** S-443: the rules that replace the phrase choice when the words are already written. */
+function pinnedLinesRules(pinned: Array<{ text: string; syllables: number }>, notes: { min: number; max: number }): string[] {
+  const total = pinned.reduce((s, l) => s + l.syllables, 0);
+  return [
+    '## The words are ALREADY WRITTEN (this overrides "Your job" 1-2)',
+    `Set these ${pinned.length} line(s), ${total} syllable(s) in all. Return them as \`phrase\` (joined with " / ")`,
+    'and their split as `syllables`; the music is what you are writing.',
+    ...pinned.map((l, i) => `- Line ${i + 1} (${l.syllables} syllable${l.syllables === 1 ? '' : 's'}): ${l.text}`),
+    `- Write ONE musical phrase per line, in order, with a rest (a breath) between lines — ${pinned.length} phrase(s).`,
+    `- Write ${notes.min}-${notes.max} melody notes in all. A syllable may HOLD through several notes`,
+    '  (one vowel moving through a short run): few words, long held notes, a slow line.',
+    '- The last syllable of each line lands on its phrase\'s final, longest note.',
+  ];
+}
+
 export function buildText2VoiceUserPrompt(ctx: PromptContext): string {
-  const notes = melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
+  const notes = ctx.noteRange ?? melodyNoteBudget(ctx.bars, ctx.quarterNotesPerBar, ctx.rhythmRange);
+  if (ctx.pinnedLines && ctx.pinnedLines.length > 0) {
+    return [
+      `Compose the music for these ${ctx.pinnedLines.length} written line(s), one phrase per line:`,
+      '',
+      ...ctx.pinnedLines.map((l, i) => `${i + 1}. ${l.text}`),
+      '',
+      `Harmony: ${ctx.harmony}. Delivery: ${ctx.delivery}. Voices to compose: ${composedVoiceCount(ctx.harmony, ctx.voiceCount)}.`,
+      `${notes.min}-${notes.max} melody notes within ${ctx.bars * ctx.quarterNotesPerBar} quarter-note beats; a syllable may hold through several notes.`,
+    ].join('\n');
+  }
   return [
     ctx.pinnedPhrase
       ? `Set EXACTLY this phrase as the vocal line — do not choose a different one:\n"${ctx.pinnedPhrase}"\n\nIt appears verbatim in this text:`
@@ -506,4 +557,169 @@ export function buildLyricsSystemPrompt(
   );
   if (stylePack.length > 0) lines.push('', ...stylePack);
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// S-443: words written to the bar budget, for one scene or the whole song
+// ---------------------------------------------------------------------------
+//
+// One call writes every requested section: each section's lines with their
+// syllable counts (the budget, song-budget.ts) and rhyme letters, the song
+// order, the song's description, and the lyric context documents as
+// BACKGROUND. The scene ✍ is the same call with one section.
+
+export const SUBMIT_SONG_WORDS_TOOL_NAME = 'submit_text2voice_song';
+
+export interface SongWordsLine {
+  syllables: number;
+  rhyme: string | null;
+  /** A line the songwriter locked: kept as written, not answered. */
+  fixed?: string;
+}
+
+export interface SongWordsSection {
+  /** The key the model answers with ("s1"). */
+  key: string;
+  /** "Verse 1", "Chorus", or the scene's name. */
+  label: string;
+  bars: number;
+  /** A role already set (by the songwriter or the arrangement): the model keeps it. */
+  role?: string;
+  /** How often this scene plays in the song (its later placements repeat these words). */
+  plays: number;
+  lines: SongWordsLine[];
+  /** The budget line (song-budget.ts budgetPromptLine). */
+  budget: string;
+  /** Words the section has now (replaced unless fixed). */
+  current?: string[];
+}
+
+export interface SongWordsPrompt {
+  /** What the song (or this scene's words) is about: the ✍ prompt, else the song description. */
+  about: string;
+  /** The song order (SDK formatSongOrder), '' when there is no arrangement. */
+  songOrder: string;
+  /** The lyric context excerpt (lyric-pack.ts contextExcerpt), '' when none. */
+  background: string;
+  sections: SongWordsSection[];
+  /** The style's own writing lines (styles.ts promptPack), when one style sings every section. */
+  stylePack: string[];
+  /** True for the whole song; false for one scene's words. */
+  song: boolean;
+}
+
+export function buildSongWordsTool(keys: string[]): LLMFunctionDeclaration {
+  return {
+    name: SUBMIT_SONG_WORDS_TOOL_NAME,
+    description:
+      `Submit the words: one entry per requested section (${keys.length}), each with its role and its lines ` +
+      '(one per phrase, each with EXACTLY its syllable count, never more).',
+    parameters: {
+      type: 'object',
+      properties: {
+        sections: {
+          type: 'array',
+          description: `Exactly ${keys.length} entries, one per section key: ${keys.join(', ')}.`,
+          items: {
+            type: 'object',
+            properties: {
+              key: { type: 'string', description: 'The section key as given (s1, s2, …).' },
+              role: {
+                type: 'string',
+                description: 'The section\'s role in the song, read from its place in the song order and its repeats: intro, verse, chorus, bridge, outro, hook … (lower-case).',
+              },
+              lines: {
+                type: 'array',
+                description: 'One entry per line asked, in order (a FIXED line is answered with its own text).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    text: { type: 'string', description: 'The line as plain words.' },
+                    syllables: {
+                      type: 'array',
+                      description: 'The line split into syllables; concatenated they reproduce the text exactly.',
+                      items: { type: 'string' },
+                    },
+                  },
+                  required: ['text', 'syllables'],
+                },
+              },
+            },
+            required: ['key', 'role', 'lines'],
+          },
+        },
+        note: { type: 'string', description: 'Optional: ONE short sentence about the song\'s shape (its motif, how the verses move).' },
+      },
+      required: ['sections'],
+    },
+  };
+}
+
+export function buildSongWordsSystemPrompt(p: SongWordsPrompt): string {
+  const lines: string[] = [
+    p.song
+      ? 'You write the ORIGINAL LYRICS of a WHOLE SONG, section by section, in one pass, for a deliberately'
+      : 'You write ORIGINAL LYRICS for one section of a song, for a deliberately',
+    'unnatural vocal instrument: speech voices forced onto notes, sung by machines. Synthetic is the point;',
+    'the fit is not. Every line has a syllable COUNT set by the bars it fills, and the count is a ceiling:',
+    'few words, held long, beat many words. Sing simply: plain words, open vowels, one image per line.',
+  ];
+  if (p.about.trim()) lines.push('', '## What it is about (from the songwriter — follow it)', p.about.trim());
+  if (p.background.trim()) {
+    lines.push(
+      '',
+      "## Background (the songwriter's documents)",
+      'Use these for the story, the imagery and the vocabulary. NEVER quote them wholesale: borrow a name or',
+      'a word, never copy a sentence.',
+      '"""',
+      p.background.trim(),
+      '"""',
+    );
+  }
+  if (p.songOrder.trim()) {
+    lines.push('', '## The song order', 'Every section in the order it plays (sung or not):', p.songOrder.trim());
+  }
+  if (p.stylePack.length > 0) lines.push('', ...p.stylePack);
+  lines.push('', p.song ? '## The sections to write' : '## The section to write');
+  for (const s of p.sections) {
+    const head = [`### ${s.key}: ${s.label}`, `${s.bars} bar${s.bars === 1 ? '' : 's'}`];
+    if (s.role) head.push(`role: ${s.role} (keep it)`);
+    if (s.plays > 1) head.push(`plays ${s.plays} times in the song with these same words`);
+    lines.push(head.join(' · '), s.budget);
+    s.lines.forEach((l, i) => {
+      lines.push(
+        l.fixed !== undefined
+          ? `- Line ${i + 1}: FIXED — "${l.fixed}"`
+          : `- Line ${i + 1}: ${l.syllables} syllable${l.syllables === 1 ? '' : 's'}${l.rhyme ? ` — end rhyme ${l.rhyme}` : ''}`,
+      );
+    });
+    if (s.current && s.current.length > 0) lines.push('Current words (replace unless FIXED):', ...s.current.map((c, i) => `  ${i + 1}. ${c}`));
+  }
+  lines.push('', '## Rules');
+  if (p.song) {
+    lines.push(
+      '- Read each section\'s ROLE from its place in the song order and how often it plays: the opening is an',
+      '  intro or a first verse, a section that returns is a chorus or a refrain, the last is an outro. Name it in `role`.',
+      '- One story or stance across the song: verses move it forward with new images and new rhyme words, a',
+      '  bridge turns it, a chorus states the hook. Different sections never repeat each other\'s lines,',
+      '  except a chorus hook that two chorus sections share on purpose.',
+    );
+  }
+  lines.push(
+    '- One line per line asked, in order. Each line has EXACTLY its syllable count, as a pronunciation',
+    '  dictionary counts the words — never more (a longer line is cut at a word).',
+    '- Lines sharing a rhyme letter END on syllables that genuinely rhyme.',
+    '- The LAST syllable of each line lands on the phrase-final note: put the weight there.',
+    '- Prefer vowel-rich words; sustained vowels are where this instrument sings.',
+    '- Each line\'s syllables, concatenated, reproduce its text exactly.',
+    `- Call ${SUBMIT_SONG_WORDS_TOOL_NAME} exactly once, with every requested key. Return nothing else.`,
+  );
+  return lines.join('\n');
+}
+
+export function buildSongWordsUserPrompt(p: SongWordsPrompt): string {
+  const n = p.sections.length;
+  const about = p.about.trim();
+  const head = p.song ? `Write the song: ${n} section${n === 1 ? '' : 's'} (${p.sections.map((s) => s.key).join(', ')})` : 'Write the words';
+  return `${head}${about ? ` — ${about.length > 200 ? `${about.slice(0, 200)}…` : about}` : ''}. Submit every section.`;
 }

@@ -30,6 +30,59 @@ system speech voice and its pitch **forced** to the note it was given. The
 speaker's mouth is kept; their intonation is thrown away. Realism is not the
 goal — this is a deliberately unnatural vocal instrument.
 
+## Verses, the song, and the lyric context
+
+Three things came over from the Synth V panel, and nothing else did; the
+panel keeps its three buttons.
+
+**Song view.** A Scene · Song switch sits over the lyrics box. Scene view is
+the box as always: this scene's own words. Song view shows the song's
+sections in play order. The words live in the app's song lyric document,
+one per arrangement, which Synth V and the Lyrics tab share, so the plugins
+sing one song. In Song view:
+
+- the box is this scene's section, one line per phrase. Edits go to the
+  song.
+- ✍ New words writes the whole song in one pass. Every placed scene with a
+  Text2Voice reading gets a section. The intro, verse, chorus and outro
+  roles come from the song order and from which sections repeat. Verses move
+  on. A scene that plays twice repeats its words, because Text2Voice renders
+  one clip per scene. The ✍ prompt becomes the song's description.
+- Sing sings this scene's section.
+
+A section that another plugin's track sings (a Synth V reading) is skipped,
+and the reason is shown. A section whose track was deleted is free again.
+
+**Phrases fit the bar length.** Written words follow a syllable COUNT set by
+the section's bars and the style. Tempo and feel never change it. In
+syllables per 8 bars (min / centre / max):
+
+| Style | Count | Lines |
+|---|---|---|
+| Choir, Chant | 3 / 4 / 6 | one per 4 bars |
+| Ballad | 6 / 8 / 12 | one per 4 bars |
+| Sprechgesang | 15 / 20 / 30 | one per 2 bars |
+| Tag-Team Rap | 30 / 40 / 60 | one per bar |
+| Trap | 36 / 48 / 72 | one per bar |
+| Custom | by pace: ×1 slow, ×2 medium, ×6 triplet, ×8 fast | |
+
+The count scales with the bars: 16 bars of Choir is about 8 syllables. When
+a melody is kept, its phrases set the lines.
+
+Each line is checked against its count. A line that runs over is cut at a
+word, so it never spills past the bar.
+
+Sing lays line k on phrase k. A line shorter than its phrase holds a
+syllable through several notes: one vowel moving through a run (a melisma,
+sung by the renderer's pitch runs). A longer line subdivides the notes.
+
+**Lyric context.** A collapsible section under the ✍ row holds the project's
+documents: a story, a world, notes. **Choose a file…** comes first, then
+paste. The name is optional. ✍ uses the documents as background (story,
+imagery, vocabulary) and never quotes them wholesale. They travel with the
+project. Opening files needs the `fileDialog` capability, which is
+registered when the app starts.
+
 ## How it works
 
 ```

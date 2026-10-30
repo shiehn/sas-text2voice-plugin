@@ -83,6 +83,17 @@ import { supportsSystemVoices, type SystemVoice } from './src/host-vocal';
 import { supportsMelodyImport } from './src/import-melody';
 
 import { silentShuffleAdapter, silentSoundAdapter } from './src/silent-sound';
+import { LyricContextSection } from './src/ui/LyricContextSection';
+import { SongSheetView } from './src/ui/SongSheetView';
+import {
+  currentSection,
+  loadSongSheet,
+  NOT_PLACED_MESSAGE,
+  pushSectionLines,
+  songHostOf,
+  SONG_API_MISSING_MESSAGE,
+  type SongSheetRow,
+} from './src/song-lyrics';
 import { configMatchesStyle, DEFAULT_REALISM, isStyleId, STYLE_IDS, STYLES, styleAxes, type StyleId } from './src/styles';
 
 interface VocalModelRow {
@@ -163,6 +174,16 @@ function Text2VoiceGroupRow({
   const [importedTrackDbId, setImportedTrackDbId] = useState<string>('');
   const [sceneTracks, setSceneTracks] = useState<Array<{ dbId: string; name: string; role?: string }>>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // S-443: Scene view (the box is this scene's own words) or Song view (the
+  // box is this scene's section of the song; ✍ writes the whole song).
+  const [view, setView] = useState<'scene' | 'song'>('scene');
+  // The scene's own words, kept aside while the box shows the song's section.
+  const [sceneText, setSceneText] = useState<string | undefined>(undefined);
+  const [sheet, setSheet] = useState<SongSheetRow[] | null>(null);
+  const [sheetReason, setSheetReason] = useState<string | null>(null);
+  const [sectionId, setSectionId] = useState<string | null>(null);
+  const [songStatus, setSongStatus] = useState('');
+  const [songTick, setSongTick] = useState(0);
   // The scene shape the GENERATOR will compare against — fetched live, because
   // predicting reusability from the melody's own bpm/bars compares the melody
   // with itself and can never foresee a compose caused by a tempo change.
@@ -208,6 +229,8 @@ function Text2VoiceGroupRow({
         setTopic(cfg.topic ?? '');
         setRhymeScheme(cfg.rhymeScheme ?? 'none');
         setImportedTrackDbId(cfg.melodySource === 'imported' ? (cfg.importedTrackDbId ?? '') : '');
+        setView(cfg.view ?? 'scene');
+        setSceneText(cfg.sceneText);
       })
       .catch(() => {});
     void host
@@ -303,6 +326,8 @@ function Text2VoiceGroupRow({
       rhymeScheme: 'none' | 'AABB' | 'ABAB';
       melodySource: 'composed' | 'imported';
       importedTrackDbId: string;
+      view: 'scene' | 'song';
+      sceneText: string | undefined;
     }>): Promise<void> => {
       if (!scene) return Promise.resolve();
       const next = {
@@ -320,13 +345,84 @@ function Text2VoiceGroupRow({
         rhymeScheme,
         melodySource: importedTrackDbId ? ('imported' as const) : ('composed' as const),
         importedTrackDbId: importedTrackDbId || undefined,
+        view,
+        sceneText,
         ...patch,
       };
       if (patch.text !== undefined) textDirty.current = false;
       return host.setSceneData(scene, configKey, next).catch(() => {});
     },
-    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, realism, styleId, sourceMode, topic, rhymeScheme, importedTrackDbId],
+    [scene, host, configKey, text, harmony, delivery, character, voiceCount, ttsVoice, pace, realism, styleId, sourceMode, topic, rhymeScheme, importedTrackDbId, view, sceneText],
   );
+
+  // S-443 Song view: the song's sections, and the one this scene sings (its
+  // lines fill the box unless the user is mid-edit). Any writer of the song
+  // (the Lyrics tab, the agent, Synth V, a ✍ here) refreshes it.
+  useEffect(() => {
+    let cancelled = false;
+    if (view !== 'song' || !scene) return undefined;
+    void loadSongSheet(host, { activeSceneId: scene, keyFor: ctx.services.trackDataKey }).then((r) => {
+      if (cancelled) return;
+      if (r.ok) {
+        setSheet(r.rows);
+        setSheetReason(null);
+        if (r.description) setTopic((t) => (t.trim() ? t : r.description));
+      } else {
+        setSheet(null);
+        setSheetReason(r.reason);
+      }
+    });
+    void currentSection(host, scene, anchor.dbId).then((c) => {
+      if (cancelled) return;
+      if (c.ok) {
+        setSectionId(c.instanceId);
+        if (!textDirty.current && c.lines.length > 0) setText(c.lines.join('\n'));
+      } else {
+        setSectionId(null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, host, scene, anchor.dbId, ctx.services.trackDataKey, songTick, isGenerating]);
+
+  useEffect(() => {
+    const song = songHostOf(host);
+    if (!song || view !== 'song') return undefined;
+    return song.onSongLyricsChanged(() => setSongTick((t) => t + 1));
+  }, [host, view]);
+
+  const switchView = useCallback(
+    (next: 'scene' | 'song'): void => {
+      if (next === view) return;
+      setSongStatus(next === 'song' && !songHostOf(host) ? SONG_API_MISSING_MESSAGE : '');
+      textDirty.current = false;
+      if (next === 'song') {
+        // The scene's own words wait aside; the box shows the song's section.
+        setSceneText(text);
+        setView('song');
+        void persist({ view: 'song', sceneText: text });
+      } else {
+        const back = sceneText ?? text;
+        setText(back);
+        setView('scene');
+        setSceneText(undefined);
+        void persist({ view: 'scene', text: back, sceneText: undefined });
+      }
+    },
+    [view, host, text, sceneText, persist],
+  );
+
+  // Song view: the box's lines are the scene's section — saved into the song.
+  const saveSectionLines = useCallback(async (): Promise<void> => {
+    await persist({ text });
+    if (!sectionId) {
+      setSongStatus(sheetReason ?? NOT_PLACED_MESSAGE);
+      return;
+    }
+    const r = await pushSectionLines(host, sectionId, text.split('\n'), anchor.dbId);
+    setSongStatus(r.ok ? '' : r.reason);
+  }, [persist, text, sectionId, sheetReason, host, anchor.dbId]);
 
   // The first Generate used to race the textarea's blur-persist: the run read
   // the OLD config and threw "Paste some text first" with text visibly present.
@@ -340,7 +436,7 @@ function Text2VoiceGroupRow({
   const anySolo = group.members.some((m) => m.track.runtimeState.solo);
   const generateDisabled = isGenerating || text.trim().length === 0;
   const newWordsDisabled =
-    isGenerating || (topic.trim().length === 0 && text.trim().length === 0);
+    isGenerating || (view !== 'song' && topic.trim().length === 0 && text.trim().length === 0);
 
   const requestNewWords = useCallback((): void => {
     if (!scene) return;
@@ -348,13 +444,16 @@ function Text2VoiceGroupRow({
     // model WRITES lyrics and populates the box; without one it picks a fresh
     // phrase from the box's current text.
     void host
-      .setSceneData(scene, ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_FORCE_WORDS_KEY), {
-        write: topic.trim().length > 0,
-      })
+      .setSceneData(
+        scene,
+        ctx.services.trackDataKey(anchor.dbId, TEXT2VOICE_FORCE_WORDS_KEY),
+        // S-443: in Song view ✍ writes the whole song (its prompt is the song's description).
+        view === 'song' ? { write: true, song: true } : { write: topic.trim().length > 0 },
+      )
       .then(() => persist({ text, topic, rhymeScheme }))
       .then(() => ctx.handlers.generate(anchorTrack.handle.id))
       .catch(() => {});
-  }, [scene, host, ctx.services, ctx.handlers, anchor.dbId, anchorTrack.handle.id, persist, text, topic, rhymeScheme]);
+  }, [scene, host, ctx.services, ctx.handlers, anchor.dbId, anchorTrack.handle.id, persist, text, topic, rhymeScheme, view]);
 
   const requestNewMusic = useCallback((): void => {
     if (!scene) return;
@@ -711,13 +810,38 @@ function Text2VoiceGroupRow({
           <div className="px-2 pt-2 pb-1">
             <div className="flex items-center gap-2 mb-1">
               <span className="text-[9px] uppercase tracking-wide text-sas-muted">
-                Lyrics — what gets sung
+                {view === 'song' ? "Lyrics — this scene's section of the song" : 'Lyrics — what gets sung'}
               </span>
+              <div className="flex-1" />
+              {/* S-443: Scene = this scene's own words; Song = the song's verses (host-owned, shared with Synth V). */}
+              <div className="flex rounded-sm border border-sas-border overflow-hidden" data-testid="text2voice-view">
+                {(['scene', 'song'] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => switchView(v)}
+                    title={
+                      v === 'song'
+                        ? "Song view: the song's sections in order. ✍ writes the whole song (verses, choruses, each to its bars); Sing sings this scene's section."
+                        : "Scene view: the box is this scene's own words, as always."
+                    }
+                    className={`px-1.5 py-0.5 text-[9px] ${
+                      view === v ? 'bg-sas-accent/20 text-sas-accent' : 'bg-sas-panel text-sas-muted hover:text-sas-accent'
+                    }`}
+                    data-testid={`text2voice-view-${v}`}
+                  >
+                    {v === 'song' ? 'Song' : 'Scene'}
+                  </button>
+                ))}
+              </div>
             </div>
+            {view === 'song' && <SongSheetView rows={sheet} reason={sheetReason} />}
             <textarea
               value={text}
               placeholder={
-                'Type or paste the words to sing — or give \u270d a prompt below and it writes lyrics here, fitted to the melody.'
+                view === 'song'
+                  ? "This scene's section of the song, one line per phrase — or press \u270d to write the whole song."
+                  : 'Type or paste the words to sing — or give \u270d a prompt below and it writes lyrics here, fitted to the melody.'
               }
               maxLength={MAX_TEXT_LENGTH}
               rows={5}
@@ -725,7 +849,7 @@ function Text2VoiceGroupRow({
                 textDirty.current = true;
                 setText(e.target.value);
               }}
-              onBlur={() => void persist({ text })}
+              onBlur={() => void (view === 'song' ? saveSectionLines() : persist({ text }))}
               className="w-full resize-y bg-sas-panel border border-sas-border rounded-sm px-2 py-1.5 text-xs leading-relaxed text-sas-text placeholder:text-sas-muted/50 focus:border-sas-accent focus:outline-none"
               data-testid="text2voice-text"
             />
@@ -735,7 +859,7 @@ function Text2VoiceGroupRow({
               <input
                 type="text"
                 value={topic}
-                placeholder="✍ prompt — what should the lyrics be about?"
+                placeholder={view === 'song' ? "✍ the song — what is it about? (saved as the song's description)" : '✍ prompt — what should the lyrics be about?'}
                 maxLength={500}
                 onChange={(e) => setTopic(e.target.value)}
                 onBlur={() => void persist({ topic })}
@@ -761,9 +885,13 @@ function Text2VoiceGroupRow({
                 onClick={requestNewWords}
                 disabled={newWordsDisabled}
                 title={
-                  topic.trim()
-                    ? 'Words only: write fresh lyrics about the prompt into the box above. Nothing sings until you press Sing.'
-                    : 'Words only: pick a fresh phrase from the lyrics box. Nothing sings until you press Sing. (Add a prompt to have lyrics written instead.)'
+                  view === 'song'
+                    ? "Words only: write the WHOLE song — every scene with a Text2Voice reading, section by section, each to its bar budget, the lyric context as background. Nothing sings until you press Sing in each scene."
+                    : newWordsDisabled && !isGenerating
+                      ? 'Nothing to work from yet: type words in the box, or give ✍ a prompt to write about.'
+                      : topic.trim()
+                        ? 'Words only: write fresh lyrics about the prompt into the box above, to the bar budget. Nothing sings until you press Sing.'
+                        : 'Words only: pick a fresh phrase from the lyrics box. Nothing sings until you press Sing. (Add a prompt to have lyrics written instead.)'
                 }
                 className={`px-2 py-1 text-[10px] rounded-sm border transition-colors whitespace-nowrap ${
                   newWordsDisabled
@@ -775,6 +903,12 @@ function Text2VoiceGroupRow({
                 {'\u270d'} New words
               </button>
             </div>
+            {songStatus && (
+              <div className="text-[9px] text-sas-muted mt-1" data-testid="text2voice-song-status">
+                {songStatus}
+              </div>
+            )}
+            <LyricContextSection host={host} />
             <div className="flex items-center justify-between mt-1 gap-2">
               <span className="text-[9px] text-sas-muted truncate">
                 <span className="text-sas-muted/80" data-testid="text2voice-next">
