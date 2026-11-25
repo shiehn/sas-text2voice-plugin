@@ -14,9 +14,11 @@ import type {
   PluginHost,
   PluginUIProps,
   PluginSettingsSchema,
+  PluginSkill,
 } from '@signalsandsorcery/plugin-sdk';
 import { Text2VoiceGeneratorPanel } from './Text2VoiceGeneratorPanel';
 import manifest from './plugin.json';
+import { RENDER_VOCAL_LINE_SKILL } from './src/sing-text';
 
 class Text2VoiceGeneratorPlugin implements GeneratorPlugin {
   readonly id = '@signalsandsorcery/text2voice-generator';
@@ -46,8 +48,22 @@ class Text2VoiceGeneratorPlugin implements GeneratorPlugin {
   getSettingsSchema(): PluginSettingsSchema | null {
     return null;
   }
+
+  /** D-499: the headless Sing (`render_vocal_line`); the app's skill handler calls `singText`. */
+  getSkills(): PluginSkill[] {
+    return [RENDER_VOCAL_LINE_SKILL];
+  }
 }
 
 export default Text2VoiceGeneratorPlugin;
 export { Text2VoiceGeneratorPlugin, Text2VoiceGeneratorPanel };
 export const text2voiceManifest = manifest;
+export {
+  singText,
+  singTextFromParams,
+  parseSingTextInput,
+  SingTextError,
+  RENDER_VOCAL_LINE_SKILL,
+  RENDER_VOCAL_LINE_SKILL_ID,
+} from './src/sing-text';
+export type { SingTextInput, SingTextResult, SungLane } from './src/sing-text';
