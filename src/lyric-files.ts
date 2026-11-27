@@ -27,7 +27,7 @@ export function asTextFileHost(host: unknown): TextFileHost | null {
 
 /** Shown in the status line when the host has no file picker or reader. */
 export const FILE_HOST_MISSING_MESSAGE =
-  'Needs a newer Signals & Sorcery (the app opens the file picker and reads the file for plugins). Paste the text for now.';
+  'Needs a newer Signals & Sorcery Studio (the app opens the file picker and reads the file for plugins). Paste the text for now.';
 
 /** File types the picker offers first; "All files" is always there too, for a note without an extension. */
 export const LYRIC_FILE_EXTENSIONS = ['md', 'markdown', 'txt', 'text'] as const;

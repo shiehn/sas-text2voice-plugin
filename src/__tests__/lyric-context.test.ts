@@ -95,7 +95,7 @@ describe('files', () => {
 
   it('a host without the file methods is detected (and the message says why)', () => {
     expect(asTextFileHost({})).toBeNull();
-    expect(FILE_HOST_MISSING_MESSAGE).toMatch(/newer Signals & Sorcery/);
+    expect(FILE_HOST_MISSING_MESSAGE).toMatch(/newer Signals & Sorcery Studio/);
   });
 
   it('plugin.json declares the file picker capability (registered at app start)', () => {

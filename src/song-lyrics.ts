@@ -38,7 +38,7 @@ export function songHostOf(host: unknown): SongHost | null {
 }
 
 export const SONG_API_MISSING_MESSAGE =
-  'This Signals & Sorcery keeps no song lyrics yet (it needs SDK 3.24 and an arrangement): use Scene view.';
+  'This Signals & Sorcery Studio keeps no song lyrics yet (it needs SDK 3.24 and an arrangement): use Scene view.';
 export const NO_ARRANGEMENT_MESSAGE = 'The project has no arrangement yet: place its scenes in the arrangement to make a song.';
 export const NOT_PLACED_MESSAGE = 'This scene is not placed in the arrangement: place it to give it a section, or use Scene view.';
 export const NO_SECTION_WORDS_MESSAGE =
